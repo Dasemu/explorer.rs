@@ -12,17 +12,25 @@
 log_level = "info"
 # How many rotated daily log files to keep per component.
 log_keep_files = 7
+# Colours: "system" (follow Windows light/dark mode and accent colour),
+# "dark" or "light".
+theme = "system"
 
 [taskbar]
 # Screen edge: "bottom" or "top".
 position = "bottom"
+# "system" follows Settings > Personalization > Taskbar > Taskbar alignment;
+# "center" or "left" force it.
+alignment = "system"
+# Show window titles next to icons (false = icon-only, like Windows 11).
+button_labels = false
 # Height in logical pixels (scaled by the monitor DPI).
-height = 40
+height = 48
 # Which monitors get a taskbar: "all" or "primary".
 monitors = "all"
 # Only show windows that live on the taskbar's own monitor.
 windows_on_own_monitor_only = false
-# Width of a window button in logical pixels.
+# Width of a labelled window button in logical pixels (button_labels = true).
 button_width = 180
 # Show the clock.
 show_clock = true
@@ -35,17 +43,25 @@ exclude_classes = []
 # Executable file names that must never appear on the taskbar (case-insensitive).
 exclude_processes = []
 
+[tray]
+# Show the notification area (system tray) on the primary monitor's taskbar.
+enabled = true
+# Dev mode only: put our tray window in front of explorer.exe's so we receive
+# tray icons too. Every message is forwarded to explorer.exe, which keeps
+# working normally. Set to false if tray icons misbehave.
+intercept_in_dev_mode = true
+
 [launcher]
 # Open the launcher when the Windows key is pressed and released alone.
 win_key_opens_launcher = true
 # Maximum number of results shown.
 max_results = 12
 # Extra folders scanned for shortcuts (.lnk, .url, .exe), in addition to
-# the Start Menu folders and shell:AppsFolder.
+# shell:AppsFolder (which already includes the Start Menu).
 extra_folders = []
-# Width/height of the launcher window in logical pixels.
+# Width/height of the Start menu in logical pixels.
 width = 640
-height = 460
+height = 720
 
 [launcher.everything]
 # File search through the Everything SDK (voidtools). Requires the binary to

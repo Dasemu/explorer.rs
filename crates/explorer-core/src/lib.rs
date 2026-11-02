@@ -10,13 +10,17 @@ pub mod clock;
 pub mod config;
 pub mod dump;
 pub mod hotkey;
+pub mod image;
 pub mod ipc;
 pub mod layout;
 pub mod logging;
 pub mod paths;
 pub mod search;
+pub mod start;
 pub mod supervisor;
 pub mod taskbar_model;
+pub mod theme;
+pub mod tray;
 pub mod window_filter;
 
 /// Human-readable product name.

@@ -61,6 +61,10 @@ impl AppPaths {
         self.config_dir.join("config.toml")
     }
 
+    pub fn pins_file(&self) -> PathBuf {
+        self.state_dir.join("pins.toml")
+    }
+
     pub fn history_file(&self) -> PathBuf {
         self.state_dir.join("launch-history.toml")
     }

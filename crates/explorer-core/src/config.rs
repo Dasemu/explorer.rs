@@ -31,6 +31,7 @@ pub enum ConfigError {
 pub struct Config {
     pub general: GeneralConfig,
     pub taskbar: TaskbarConfig,
+    pub tray: TrayConfig,
     pub launcher: LauncherConfig,
     pub supervisor: SupervisorConfig,
 }
@@ -40,6 +41,7 @@ pub struct Config {
 pub struct GeneralConfig {
     pub log_level: String,
     pub log_keep_files: usize,
+    pub theme: ThemeMode,
 }
 
 impl Default for GeneralConfig {
@@ -47,8 +49,37 @@ impl Default for GeneralConfig {
         Self {
             log_level: "info".into(),
             log_keep_files: 7,
+            theme: ThemeMode::System,
         }
     }
+}
+
+/// Colour mode: follow Windows, or force dark/light.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeMode {
+    System,
+    Dark,
+    Light,
+}
+
+impl ThemeMode {
+    pub fn to_theme_mode(self) -> crate::theme::Mode {
+        match self {
+            ThemeMode::System => crate::theme::Mode::System,
+            ThemeMode::Dark => crate::theme::Mode::Dark,
+            ThemeMode::Light => crate::theme::Mode::Light,
+        }
+    }
+}
+
+/// Taskbar alignment: follow Windows' "Taskbar alignment" setting, or force.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Alignment {
+    System,
+    Center,
+    Left,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +100,8 @@ pub enum MonitorSelection {
 #[serde(default, deny_unknown_fields)]
 pub struct TaskbarConfig {
     pub position: Edge,
+    pub alignment: Alignment,
+    pub button_labels: bool,
     pub height: u32,
     pub monitors: MonitorSelection,
     pub windows_on_own_monitor_only: bool,
@@ -84,7 +117,9 @@ impl Default for TaskbarConfig {
     fn default() -> Self {
         Self {
             position: Edge::Bottom,
-            height: 40,
+            alignment: Alignment::System,
+            button_labels: false,
+            height: 48,
             monitors: MonitorSelection::All,
             windows_on_own_monitor_only: false,
             button_width: 180,
@@ -93,6 +128,22 @@ impl Default for TaskbarConfig {
             date_format: "%d/%m/%Y".into(),
             exclude_classes: Vec::new(),
             exclude_processes: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TrayConfig {
+    pub enabled: bool,
+    pub intercept_in_dev_mode: bool,
+}
+
+impl Default for TrayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            intercept_in_dev_mode: true,
         }
     }
 }
@@ -115,7 +166,7 @@ impl Default for LauncherConfig {
             max_results: 12,
             extra_folders: Vec::new(),
             width: 640,
-            height: 460,
+            height: 720,
             everything: EverythingConfig::default(),
         }
     }
@@ -213,9 +264,9 @@ impl Config {
                 "launcher.max_results must be between 1 and 100".into(),
             ));
         }
-        if l.width < 200 || l.height < 120 {
+        if l.width < 400 || l.height < 400 {
             return Err(ConfigError::Invalid(
-                "launcher.width must be >= 200 and launcher.height >= 120".into(),
+                "launcher.width and launcher.height must be >= 400".into(),
             ));
         }
         let s = &self.supervisor;
