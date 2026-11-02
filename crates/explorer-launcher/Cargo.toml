@@ -1,8 +1,28 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 [package]
 name = "explorer-launcher"
+description = "explorer.rs launcher: keyboard-first app search. No web results, ever."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+
+[[bin]]
+name = "explorer-rs-launcher"
+path = "src/main.rs"
+
+[features]
+default = []
+# File search through the Everything SDK (voidtools). Everything64.dll is
+# loaded dynamically at runtime; nothing is linked or redistributed.
+everything = []
+
 [dependencies]
+explorer-core.workspace = true
+explorer-win.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
