@@ -180,6 +180,13 @@ dependencies = [
 [[package]]
 name = "explorer-launcher"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "explorer-core",
+ "explorer-win",
+ "tracing",
+]
 
 [[package]]
 name = "explorer-supervisor"
@@ -195,6 +202,13 @@ dependencies = [
 [[package]]
 name = "explorer-taskbar"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "explorer-core",
+ "explorer-win",
+ "tracing",
+]
 
 [[package]]
 name = "explorer-win"
