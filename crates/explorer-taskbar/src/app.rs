@@ -3,48 +3,56 @@
 //!
 //! Structure (all on one UI thread):
 //! - a hidden **controller** window owns the [`TaskbarModel`], receives
-//!   shell-hook / WinEvent notifications, the Win-key signal, timers and
-//!   display changes, and owns the bar windows;
+//!   shell-hook / WinEvent notifications, the Win-key signal, timers,
+//!   theme and display changes, and owns the bar windows and the tray host;
 //! - one **bar** window per monitor: an AppBar that paints the model and
-//!   handles mouse input.
+//!   handles mouse input. The tray is shown on the primary monitor's bar.
 //!
 //! Shared state lives in an `Rc<Shared>` with `RefCell`s that are only
 //! borrowed for short, non-reentrant sections.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use explorer_core::clock;
-use explorer_core::config::{Config, MonitorSelection};
+use explorer_core::config::{Alignment, Config, Edge, MonitorSelection};
+use explorer_core::image::SharedImage;
 use explorer_core::ipc::{LauncherCommand, RunMode, TASKBAR_WINDOW_CLASS};
-use explorer_core::layout::{bar_layout, BarHit, BarLayout, Rect};
+use explorer_core::layout::{bar_layout, BarHit, BarLayout, BarSpec, Rect};
 use explorer_core::paths::AppPaths;
 use explorer_core::supervisor::{EXIT_RESTART, EXIT_SHUTDOWN_ALL};
 use explorer_core::taskbar_model::{Button, ClickAction, TaskbarModel, WindowEvent};
+use explorer_core::theme::Palette;
+use explorer_core::tray::{IconKey, TrayButton};
 use explorer_core::window_filter::FilterRules;
 use explorer_win::appbar::{AppBar, ABN_FULLSCREENAPP, ABN_POSCHANGED};
-use explorer_win::gfx::{theme, Align, Gfx, Surface};
+use explorer_win::gfx::{Align, Color, Gfx, Surface};
 use explorer_win::keyboard::{WinKeyHook, WM_APP_WINKEY};
 use explorer_win::monitors::{self, Monitor};
 use explorer_win::shellhook::{self, events as ev, ShellHooks, WM_APP_WINEVENT};
+use explorer_win::tooltip::Tooltip;
+use explorer_win::tray::{TrayHost, WM_APP_TRAY_CHANGED};
 use explorer_win::util::{hwnd_to_u64, u64_to_hwnd, wide, ComApartment};
 use explorer_win::window::{self, CreateParams, Handler};
 use explorer_win::windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use explorer_win::windows::Win32::Graphics::Gdi::{
-    BeginPaint, EndPaint, InvalidateRect, MonitorFromWindow, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT,
+    BeginPaint, ClientToScreen, EndPaint, InvalidateRect, MonitorFromWindow,
+    MONITOR_DEFAULTTONEAREST, PAINTSTRUCT,
 };
 use explorer_win::windows::Win32::System::Shutdown::{ExitWindowsEx, EWX_LOGOFF, SHUTDOWN_REASON};
 use explorer_win::windows::Win32::UI::Input::KeyboardAndMouse::{
     TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
 };
 use explorer_win::windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, DestroyWindow, GetCursorPos, KillTimer,
-    PostMessageW, SetTimer, SetWindowPos, TrackPopupMenu, HWND_NOTOPMOST, HWND_TOPMOST,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, DestroyWindow, GetClientRect, GetCursorPos,
+    KillTimer, PostMessageW, SetTimer, SetWindowPos, TrackPopupMenu, HWND_NOTOPMOST, HWND_TOPMOST,
     MA_NOACTIVATE, MF_SEPARATOR, MF_STRING, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
     TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_ACTIVATE, WM_APP, WM_CREATE, WM_DESTROY,
-    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_PAINT,
-    WM_RBUTTONUP, WM_SIZE, WM_TIMER, WM_WINDOWPOSCHANGED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP,
+    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_MOUSEACTIVATE,
+    WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_SIZE, WM_TIMER, WM_WINDOWPOSCHANGED,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::Args;
@@ -65,14 +73,20 @@ const TIMER_REBUILD: usize = 3;
 /// Full re-enumeration interval: a safety net for missed notifications.
 const RESYNC_MS: u32 = 30_000;
 
+/// Window icons are fetched once at this size and scaled when drawn.
+const WINDOW_ICON_PX: u32 = 48;
+
 struct Shared {
     gfx: Gfx,
     config: Config,
     mode: RunMode,
     model: RefCell<TaskbarModel>,
-    clock_text: RefCell<(String, String)>,
+    clock_text: RefCell<(String, String, String)>,
     bars: RefCell<Vec<HWND>>,
-    controller: Cell<HWND>,
+    palette: Cell<Palette>,
+    centered: Cell<bool>,
+    window_icons: RefCell<HashMap<u64, Option<SharedImage>>>,
+    tray: RefCell<Option<TrayHost>>,
 }
 
 impl Shared {
@@ -89,6 +103,7 @@ impl Shared {
         let next = (
             clock::format(&t.clock_format, &now),
             clock::format(&t.date_format, &now),
+            clock::format("%a %d %b %Y", &now),
         );
         let mut cur = self.clock_text.borrow_mut();
         if *cur != next {
@@ -96,6 +111,45 @@ impl Shared {
             true
         } else {
             false
+        }
+    }
+
+    /// Re-read theme and alignment. Returns true if anything changed.
+    fn reload_appearance(&self) -> bool {
+        let pal = Palette::from_system(
+            &explorer_win::theme::system_theme(),
+            self.config.general.theme.to_theme_mode(),
+        );
+        let centered = match self.config.taskbar.alignment {
+            Alignment::System => explorer_win::theme::taskbar_centered(),
+            Alignment::Center => true,
+            Alignment::Left => false,
+        };
+        let changed = pal != self.palette.get() || centered != self.centered.get();
+        self.palette.set(pal);
+        self.centered.set(centered);
+        changed
+    }
+
+    /// Fetch icons for buttons that have none yet; drop icons of windows
+    /// that are gone.
+    fn refresh_window_icons(&self) {
+        let hwnds: Vec<u64> = self
+            .model
+            .borrow()
+            .buttons()
+            .iter()
+            .map(|b| b.hwnd)
+            .collect();
+        let mut icons = self.window_icons.borrow_mut();
+        icons.retain(|h, _| hwnds.contains(h));
+        for h in hwnds {
+            if let std::collections::hash_map::Entry::Vacant(e) = icons.entry(h) {
+                e.insert(explorer_win::icons::for_window(
+                    u64_to_hwnd(h),
+                    WINDOW_ICON_PX,
+                ));
+            }
         }
     }
 }
@@ -150,10 +204,17 @@ pub fn run(args: Args) -> i32 {
         model: RefCell::new(TaskbarModel::new(FilterRules::from_config(&config.taskbar))),
         config,
         mode,
-        clock_text: RefCell::new((String::new(), String::new())),
+        clock_text: RefCell::new(Default::default()),
         bars: RefCell::new(Vec::new()),
-        controller: Cell::new(HWND::default()),
+        palette: Cell::new(Palette::from_system(
+            &Default::default(),
+            explorer_core::theme::Mode::Dark,
+        )),
+        centered: Cell::new(true),
+        window_icons: RefCell::new(HashMap::new()),
+        tray: RefCell::new(None),
     });
+    shared.reload_appearance();
 
     window::register_class(CONTROLLER_CLASS, None);
     window::register_class(TASKBAR_WINDOW_CLASS, None);
@@ -172,6 +233,8 @@ pub fn run(args: Args) -> i32 {
             hooks: None,
             winkey: None,
             taskbar_created_msg: explorer_win::ipc::registered_message("TaskbarCreated"),
+            tray_started: None,
+            ticks: 0,
         }),
     ) {
         Ok(h) => h,
@@ -180,11 +243,12 @@ pub fn run(args: Args) -> i32 {
             return 1;
         }
     };
-    shared.controller.set(controller);
     // SAFETY: posting to our own window.
     let _ = unsafe { PostMessageW(Some(controller), WM_APP_INIT, WPARAM(0), LPARAM(0)) };
 
     let code = window::run_message_loop(|_| false);
+    // Drop the tray (and its window) before COM goes away.
+    shared.tray.borrow_mut().take();
     tracing::info!(code, "taskbar exiting");
     code
 }
@@ -198,6 +262,8 @@ struct Controller {
     hooks: Option<ShellHooks>,
     winkey: Option<WinKeyHook>,
     taskbar_created_msg: u32,
+    tray_started: Option<Instant>,
+    ticks: u64,
 }
 
 impl Controller {
@@ -230,12 +296,14 @@ impl Controller {
                 },
                 Box::new(Bar {
                     shared: self.shared.clone(),
+                    primary: m.primary,
                     monitor: m,
                     appbar: None,
                     surface: None,
                     layout: None,
                     hover: BarHit::Empty,
                     tracking: false,
+                    tooltip: None,
                 }),
             );
             match res {
@@ -245,16 +313,21 @@ impl Controller {
         }
     }
 
+    fn changed(&mut self) {
+        self.shared.refresh_window_icons();
+        self.shared.invalidate_bars();
+    }
+
     fn resync(&mut self) {
         let snaps = explorer_win::winlist::snapshot_all();
         if self.shared.model.borrow_mut().reset(snaps) {
-            self.shared.invalidate_bars();
+            self.changed();
         }
     }
 
     fn apply(&mut self, e: WindowEvent) {
         if self.shared.model.borrow_mut().apply(e) {
-            self.shared.invalidate_bars();
+            self.changed();
         }
     }
 
@@ -292,6 +365,18 @@ impl Controller {
             _ => self.upsert(hwnd),
         }
     }
+
+    fn start_tray(&mut self, hwnd: HWND) {
+        let cfg = &self.shared.config.tray;
+        if !cfg.enabled {
+            return;
+        }
+        let host = TrayHost::start(self.shared.mode, cfg.intercept_in_dev_mode, hwnd);
+        if host.is_some() {
+            self.tray_started = Some(Instant::now());
+        }
+        *self.shared.tray.borrow_mut() = host;
+    }
 }
 
 impl Handler for Controller {
@@ -303,10 +388,20 @@ impl Handler for Controller {
             }
         }
         if msg == self.taskbar_created_msg && self.taskbar_created_msg != 0 {
-            // explorer.exe restarted (dev mode): AppBar registrations are
-            // lost, so recreate the bars.
+            // Our own tray broadcasts TaskbarCreated at start-up; ignore the
+            // echo. Otherwise explorer restarted (dev mode): AppBar
+            // registrations are lost, so recreate the bars.
+            if self
+                .tray_started
+                .is_some_and(|t| t.elapsed() < Duration::from_secs(3))
+            {
+                return Some(LRESULT(0));
+            }
             tracing::info!("TaskbarCreated received; rebuilding bars");
             self.rebuild_bars();
+            if let Some(t) = self.shared.tray.borrow().as_ref() {
+                t.ensure_front();
+            }
             return Some(LRESULT(0));
         }
         match msg {
@@ -321,16 +416,14 @@ impl Handler for Controller {
                     }
                 }
                 self.shared.update_clock();
+                self.start_tray(hwnd);
                 self.resync();
+                self.shared.refresh_window_icons();
                 self.rebuild_bars();
                 // SAFETY: timers on our own window.
                 unsafe {
                     SetTimer(Some(hwnd), TIMER_CLOCK, 1000, None);
                     SetTimer(Some(hwnd), TIMER_RESYNC, RESYNC_MS, None);
-                }
-                #[cfg(feature = "tray")]
-                if let Err(e) = explorer_win::tray::start(self.shared.mode) {
-                    tracing::warn!(error = %e, "tray start failed");
                 }
                 Some(LRESULT(0))
             }
@@ -342,10 +435,35 @@ impl Handler for Controller {
                 explorer_win::ipc::send_launcher_command(LauncherCommand::Toggle);
                 Some(LRESULT(0))
             }
+            WM_APP_TRAY_CHANGED => {
+                self.shared.invalidate_bars();
+                Some(LRESULT(0))
+            }
+            WM_SETTINGCHANGE => {
+                // Theme ("ImmersiveColorSet") or taskbar alignment changed.
+                // Cheap registry reads; no repositioning, so our own
+                // SPI_SETWORKAREA notifications cannot loop.
+                if self.shared.reload_appearance() {
+                    tracing::info!("appearance changed");
+                    self.shared.invalidate_bars();
+                }
+                None
+            }
             WM_TIMER => {
                 match wparam.0 {
                     TIMER_CLOCK => {
+                        self.ticks += 1;
                         if self.shared.update_clock() {
+                            self.shared.invalidate_bars();
+                        }
+                        let pruned = match self.shared.tray.borrow().as_ref() {
+                            Some(t) => {
+                                t.ensure_front();
+                                self.ticks % 5 == 0 && t.prune()
+                            }
+                            None => false,
+                        };
+                        if pruned {
                             self.shared.invalidate_bars();
                         }
                     }
@@ -388,11 +506,20 @@ fn thickness(config: &Config, dpi: u32) -> i32 {
 struct Bar {
     shared: Rc<Shared>,
     monitor: Monitor,
+    primary: bool,
     appbar: Option<AppBar>,
     surface: Option<Surface>,
-    layout: Option<(BarLayout, Vec<Button>)>,
+    layout: Option<Snapshot>,
     hover: BarHit,
     tracking: bool,
+    tooltip: Option<Tooltip>,
+}
+
+/// What was painted, for hit-testing and tooltips.
+struct Snapshot {
+    layout: BarLayout,
+    buttons: Vec<Button>,
+    tray: Vec<(IconKey, String)>,
 }
 
 const CMD_CLOSE_WINDOW: u32 = 1;
@@ -401,6 +528,7 @@ const CMD_RESTART_TASKBAR: u32 = 11;
 const CMD_QUIT: u32 = 12;
 const CMD_SIGN_OUT: u32 = 13;
 const CMD_OPEN_LAUNCHER: u32 = 14;
+const CMD_TASKBAR_SETTINGS: u32 = 15;
 
 impl Bar {
     fn scale(&self) -> f32 {
@@ -425,23 +553,41 @@ impl Bar {
             .collect()
     }
 
-    fn compute_layout(&self, hwnd: HWND) -> (BarLayout, Vec<Button>) {
+    fn tray_items(&self) -> Vec<(IconKey, String)> {
+        if !self.primary {
+            return Vec::new();
+        }
+        let tray = self.shared.tray.borrow();
+        let Some(t) = tray.as_ref() else {
+            return Vec::new();
+        };
+        let st = t.state.borrow();
+        st.model.visible().map(|i| (i.key, i.tip.clone())).collect()
+    }
+
+    fn compute(&self, hwnd: HWND) -> Snapshot {
         let mut rc = RECT::default();
         // SAFETY: valid out-pointer.
-        let _ = unsafe {
-            explorer_win::windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rc)
-        };
+        let _ = unsafe { GetClientRect(hwnd, &mut rc) };
         let buttons = self.visible_buttons();
+        let tray = self.tray_items();
         let t = &self.shared.config.taskbar;
-        let l = bar_layout(
-            (rc.right - rc.left) as f32,
-            (rc.bottom - rc.top) as f32,
-            self.scale(),
-            buttons.len(),
-            t.button_width as f32,
-            t.show_clock,
-        );
-        (l, buttons)
+        let layout = bar_layout(&BarSpec {
+            width: (rc.right - rc.left) as f32,
+            height: (rc.bottom - rc.top) as f32,
+            scale: self.scale(),
+            n_buttons: buttons.len(),
+            button_width: t.button_width as f32,
+            labels: t.button_labels,
+            centered: self.shared.centered.get(),
+            show_clock: t.show_clock,
+            tray_icons: tray.len(),
+        });
+        Snapshot {
+            layout,
+            buttons,
+            tray,
+        }
     }
 
     fn position(&mut self, hwnd: HWND) {
@@ -478,90 +624,177 @@ impl Bar {
         let mut ps = PAINTSTRUCT::default();
         // SAFETY: BeginPaint/EndPaint pairing in WM_PAINT.
         unsafe { BeginPaint(hwnd, &mut ps) };
-        let (layout, buttons) = self.compute_layout(hwnd);
-        let scale = self.scale();
+        let snap = self.compute(hwnd);
+        let s = self.scale();
+        let pal = self.shared.palette.get();
         let active = self.shared.model.borrow().active();
         let clock_text = self.shared.clock_text.borrow().clone();
         let hover = self.hover;
-        let surface = self.surface.get_or_insert_with(|| Surface::new(hwnd));
-        surface.draw(&self.shared.gfx, theme::BAR_BG, |p| {
-            let inset = |r: Rect| {
-                Rect::new(
-                    r.x + 2.0 * scale,
-                    r.y + 4.0 * scale,
-                    r.w - 4.0 * scale,
-                    r.h - 8.0 * scale,
-                )
-            };
-            let radius = 4.0 * scale;
-            if hover == BarHit::Start {
-                p.fill_rounded(inset(layout.start), radius, theme::BUTTON_HOVER);
-            }
-            p.text(
-                "\u{229E}",
-                layout.start,
-                20.0 * scale,
-                theme::TEXT,
-                Align::Center,
-                false,
-            );
-            for (i, (r, b)) in layout.buttons.iter().zip(buttons.iter()).enumerate() {
-                let is_active = active == Some(b.hwnd);
-                let bg = if b.flashing {
-                    theme::FLASH
-                } else if is_active {
-                    theme::BUTTON_ACTIVE
-                } else if hover == BarHit::Button(i) {
-                    theme::BUTTON_HOVER
-                } else {
-                    theme::BUTTON_BG
-                };
-                let ir = inset(*r);
-                p.fill_rounded(ir, radius, bg);
-                if is_active {
-                    let bar_w = (ir.w * 0.4).max(8.0 * scale);
-                    p.fill_rounded(
-                        Rect::new(
-                            ir.x + (ir.w - bar_w) / 2.0,
-                            ir.bottom() - 3.0 * scale,
-                            bar_w,
-                            3.0 * scale,
-                        ),
-                        1.5 * scale,
-                        theme::ACCENT,
-                    );
+        let labels = self.shared.config.taskbar.button_labels;
+        let icons: Vec<Option<SharedImage>> = {
+            let cache = self.shared.window_icons.borrow();
+            snap.buttons
+                .iter()
+                .map(|b| cache.get(&b.hwnd).cloned().flatten())
+                .collect()
+        };
+        let tray_images: Vec<Option<SharedImage>> = {
+            let tray = self.shared.tray.borrow();
+            match tray.as_ref() {
+                Some(t) => {
+                    let st = t.state.borrow();
+                    snap.tray
+                        .iter()
+                        .map(|(k, _)| st.images.get(k).cloned())
+                        .collect()
                 }
-                let pad = 8.0 * scale;
-                p.text(
-                    &b.title,
-                    Rect::new(ir.x + pad, ir.y, ir.w - 2.0 * pad, ir.h),
-                    12.0 * scale,
-                    theme::TEXT,
-                    Align::Left,
-                    false,
+                None => Vec::new(),
+            }
+        };
+        let l = &snap.layout;
+        let full_width = {
+            let mut rc = RECT::default();
+            // SAFETY: valid out-pointer.
+            let _ = unsafe { GetClientRect(hwnd, &mut rc) };
+            (rc.right - rc.left) as f32
+        };
+        let surface = self.surface.get_or_insert_with(|| Surface::new(hwnd));
+        surface.draw(&self.shared.gfx, Color(pal.bar_bg), |p| {
+            let inset =
+                |r: Rect| Rect::new(r.x + 2.0 * s, r.y + 4.0 * s, r.w - 4.0 * s, r.h - 8.0 * s);
+            let radius = 4.0 * s;
+            // Hairline separating the bar from the desktop.
+            p.fill(Rect::new(0.0, 0.0, full_width, 1.0), Color(pal.border));
+
+            // Start button: four rounded tiles in the accent colour.
+            if hover == BarHit::Start {
+                p.fill_rounded(inset(l.start), radius, Color(pal.button_hover));
+            }
+            let tile = 9.0 * s;
+            let gap = 1.5 * s;
+            let total = tile * 2.0 + gap;
+            let ox = l.start.x + (l.start.w - total) / 2.0;
+            let oy = l.start.y + (l.start.h - total) / 2.0;
+            for (dx, dy) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+                p.fill_rounded(
+                    Rect::new(ox + dx * (tile + gap), oy + dy * (tile + gap), tile, tile),
+                    1.5 * s,
+                    Color(pal.accent_text),
                 );
             }
-            if layout.overflow > 0 {
-                // TODO(taskbar): overflow menu. For now show the count.
-                if let Some(last) = layout.buttons.last() {
-                    let r = Rect::new(last.right(), 0.0, 28.0 * scale, layout.start.h);
+
+            // Window buttons.
+            for (i, (r, b)) in l.buttons.iter().zip(snap.buttons.iter()).enumerate() {
+                let is_active = active == Some(b.hwnd);
+                let ir = inset(*r);
+                let bg = if b.flashing {
+                    Some(pal.flash)
+                } else if is_active {
+                    Some(pal.button_active)
+                } else if hover == BarHit::Button(i) {
+                    Some(pal.button_hover)
+                } else {
+                    None
+                };
+                if let Some(bg) = bg {
+                    p.fill_rounded(ir, radius, Color(bg));
+                }
+                let icon_size = 24.0 * s;
+                let icon = icons.get(i).cloned().flatten();
+                if labels {
+                    let icon_r = Rect::new(
+                        ir.x + 8.0 * s,
+                        ir.y + (ir.h - icon_size) / 2.0,
+                        icon_size,
+                        icon_size,
+                    );
+                    if let Some(img) = &icon {
+                        p.image(img, icon_r);
+                    }
+                    let tx = icon_r.right() + 8.0 * s;
                     p.text(
-                        &format!("+{}", layout.overflow),
+                        &b.title,
+                        Rect::new(tx, ir.y, (ir.right() - tx - 6.0 * s).max(0.0), ir.h),
+                        12.0 * s,
+                        Color(pal.text),
+                        Align::Left,
+                        false,
+                    );
+                } else {
+                    let icon_r = Rect::new(
+                        ir.x + (ir.w - icon_size) / 2.0,
+                        ir.y + (ir.h - icon_size) / 2.0 - s,
+                        icon_size,
+                        icon_size,
+                    );
+                    match &icon {
+                        Some(img) => p.image(img, icon_r),
+                        None => {
+                            // No icon: first letter of the title.
+                            let letter: String = b.title.chars().take(1).collect();
+                            p.text(
+                                &letter,
+                                icon_r,
+                                16.0 * s,
+                                Color(pal.text),
+                                Align::Center,
+                                true,
+                            );
+                        }
+                    }
+                }
+                // Running indicator: short and dim; long and accent if active.
+                let (w, c) = if is_active {
+                    (16.0 * s, pal.accent_text)
+                } else {
+                    (6.0 * s, pal.running_indicator)
+                };
+                p.fill_rounded(
+                    Rect::new(ir.x + (ir.w - w) / 2.0, ir.bottom() - 3.0 * s, w, 3.0 * s),
+                    1.5 * s,
+                    Color(c),
+                );
+            }
+            if l.overflow > 0 {
+                // TODO(taskbar): overflow menu. For now show the count.
+                if let Some(last) = l.buttons.last() {
+                    let r = Rect::new(last.right(), 0.0, 28.0 * s, l.start.h);
+                    p.text(
+                        &format!("+{}", l.overflow),
                         r,
-                        11.0 * scale,
-                        theme::TEXT_DIM,
+                        11.0 * s,
+                        Color(pal.text_dim),
                         Align::Center,
                         false,
                     );
                 }
             }
-            if let Some(c) = layout.clock {
+
+            // Tray.
+            for (i, r) in l.tray.iter().enumerate() {
+                if hover == BarHit::Tray(i) {
+                    p.fill_rounded(inset(*r), radius, Color(pal.button_hover));
+                }
+                if let Some(Some(img)) = tray_images.get(i) {
+                    let sz = 16.0 * s;
+                    p.image(
+                        img,
+                        Rect::new(r.x + (r.w - sz) / 2.0, r.y + (r.h - sz) / 2.0, sz, sz),
+                    );
+                }
+            }
+
+            // Clock.
+            if let Some(c) = l.clock {
+                if hover == BarHit::Clock {
+                    p.fill_rounded(inset(c), radius, Color(pal.button_hover));
+                }
                 if clock_text.1.is_empty() {
                     p.text(
                         &clock_text.0,
                         c,
-                        12.0 * scale,
-                        theme::TEXT,
+                        12.0 * s,
+                        Color(pal.text),
                         Align::Center,
                         false,
                     );
@@ -569,69 +802,152 @@ impl Bar {
                     let half = c.h / 2.0;
                     p.text(
                         &clock_text.0,
-                        Rect::new(c.x, c.y + 2.0 * scale, c.w, half - 2.0 * scale),
-                        12.0 * scale,
-                        theme::TEXT,
+                        Rect::new(c.x, c.y + 4.0 * s, c.w, half - 4.0 * s),
+                        12.0 * s,
+                        Color(pal.text),
                         Align::Center,
                         false,
                     );
                     p.text(
                         &clock_text.1,
-                        Rect::new(c.x, c.y + half, c.w, half - 2.0 * scale),
-                        11.0 * scale,
-                        theme::TEXT_DIM,
+                        Rect::new(c.x, c.y + half, c.w, half - 4.0 * s),
+                        12.0 * s,
+                        Color(pal.text),
                         Align::Center,
                         false,
                     );
                 }
             }
         });
-        self.layout = Some((layout, buttons));
+        self.layout = Some(snap);
         // SAFETY: matches BeginPaint above.
         let _ = unsafe { EndPaint(hwnd, &ps) };
     }
 
-    fn hit(&self, lparam: LPARAM) -> (BarHit, Option<Button>) {
+    fn hit(&self, lparam: LPARAM) -> BarHit {
         let x = (lparam.0 & 0xffff) as i16 as f32;
         let y = ((lparam.0 >> 16) & 0xffff) as i16 as f32;
-        let Some((layout, buttons)) = &self.layout else {
-            return (BarHit::Empty, None);
-        };
-        let h = layout.hit(x, y);
-        let b = match h {
-            BarHit::Button(i) => buttons.get(i).cloned(),
-            _ => None,
-        };
-        (h, b)
+        match &self.layout {
+            Some(s) => s.layout.hit(x, y),
+            None => BarHit::Empty,
+        }
     }
 
-    fn on_click(&mut self, lparam: LPARAM) {
-        let (h, b) = self.hit(lparam);
-        match (h, b) {
-            (BarHit::Start, _) => {
+    fn button(&self, i: usize) -> Option<Button> {
+        self.layout.as_ref().and_then(|s| s.buttons.get(i).cloned())
+    }
+
+    fn tray_key(&self, i: usize) -> Option<IconKey> {
+        self.layout
+            .as_ref()
+            .and_then(|s| s.tray.get(i).map(|t| t.0))
+    }
+
+    fn update_tooltip(&mut self, hwnd: HWND) {
+        let (text, rect) = match (self.hover, &self.layout) {
+            (BarHit::Start, Some(s)) => (Some("Start".to_string()), Some(s.layout.start)),
+            (BarHit::Button(i), Some(s)) => (
+                s.buttons.get(i).map(|b| b.title.clone()),
+                s.layout.buttons.get(i).copied(),
+            ),
+            (BarHit::Tray(i), Some(s)) => (
+                s.tray.get(i).map(|t| t.1.clone()),
+                s.layout.tray.get(i).copied(),
+            ),
+            (BarHit::Clock, Some(s)) => (
+                Some(self.shared.clock_text.borrow().2.clone()),
+                s.layout.clock,
+            ),
+            _ => (None, None),
+        };
+        match (text.filter(|t| !t.is_empty()), rect) {
+            (Some(text), Some(r)) => {
+                if self.tooltip.is_none() {
+                    self.tooltip = Tooltip::new(hwnd);
+                }
+                let mut pt = POINT {
+                    x: r.x as i32,
+                    y: 0,
+                };
+                // SAFETY: valid out-pointer.
+                let _ = unsafe { ClientToScreen(hwnd, &mut pt) };
+                let s = self.scale();
+                let y = match self.shared.config.taskbar.position {
+                    Edge::Bottom => pt.y - (34.0 * s) as i32,
+                    Edge::Top => pt.y + r.h as i32 + (6.0 * s) as i32,
+                };
+                if let Some(t) = self.tooltip.as_mut() {
+                    t.show(&text, pt.x, y);
+                }
+            }
+            _ => {
+                if let Some(t) = self.tooltip.as_mut() {
+                    t.hide();
+                }
+            }
+        }
+    }
+
+    fn on_click(&mut self, lparam: LPARAM, double: bool) {
+        match self.hit(lparam) {
+            BarHit::Start if !double => {
                 explorer_win::ipc::send_launcher_command(LauncherCommand::Toggle);
             }
-            (BarHit::Button(_), Some(b)) => {
-                let target = u64_to_hwnd(b.hwnd);
-                let minimized = explorer_win::winlist::is_minimized(target);
-                let action = self.shared.model.borrow().click_action(b.hwnd, minimized);
-                match action {
-                    ClickAction::Activate => explorer_win::activate::activate(target),
-                    ClickAction::Minimize => explorer_win::activate::minimize(target),
+            BarHit::Button(i) if !double => {
+                if let Some(b) = self.button(i) {
+                    let target = u64_to_hwnd(b.hwnd);
+                    let minimized = explorer_win::winlist::is_minimized(target);
+                    let action = self.shared.model.borrow().click_action(b.hwnd, minimized);
+                    match action {
+                        ClickAction::Activate => explorer_win::activate::activate(target),
+                        ClickAction::Minimize => explorer_win::activate::minimize(target),
+                    }
                 }
+            }
+            BarHit::Tray(i) => {
+                let button = if double {
+                    TrayButton::LeftDouble
+                } else {
+                    TrayButton::Left
+                };
+                self.click_tray(i, button);
             }
             _ => {}
         }
     }
 
+    fn click_tray(&self, i: usize, button: TrayButton) {
+        let Some(key) = self.tray_key(i) else {
+            return;
+        };
+        let mut pt = POINT::default();
+        // SAFETY: valid out-pointer.
+        let _ = unsafe { GetCursorPos(&mut pt) };
+        if let Some(t) = self.shared.tray.borrow().as_ref() {
+            t.click(key, button, pt.x, pt.y);
+        }
+    }
+
     fn on_right_click(&mut self, hwnd: HWND, lparam: LPARAM) {
-        let (h, b) = self.hit(lparam);
+        let hit = self.hit(lparam);
+        if let BarHit::Tray(i) = hit {
+            self.click_tray(i, TrayButton::Right);
+            return;
+        }
+        if let Some(t) = self.tooltip.as_mut() {
+            t.hide();
+        }
+        let b = match hit {
+            BarHit::Button(i) => self.button(i),
+            _ => None,
+        };
         let mut items: Vec<(u32, &str)> = Vec::new();
-        if let (BarHit::Button(_), Some(_)) = (h, &b) {
+        if b.is_some() {
             items.push((CMD_CLOSE_WINDOW, "Close window"));
         } else {
-            items.push((CMD_OPEN_LAUNCHER, "Open launcher"));
+            items.push((CMD_OPEN_LAUNCHER, "Open Start"));
             items.push((CMD_TASK_MANAGER, "Task Manager"));
+            items.push((CMD_TASKBAR_SETTINGS, "Taskbar settings"));
             items.push((0, ""));
             items.push((CMD_RESTART_TASKBAR, "Restart taskbar"));
             match self.shared.mode {
@@ -654,6 +970,11 @@ impl Bar {
                     tracing::warn!(error = %e, "cannot start Task Manager");
                 }
             }
+            CMD_TASKBAR_SETTINGS => {
+                if let Err(e) = explorer_win::apps::shell_execute("ms-settings:taskbar", false) {
+                    tracing::warn!(error = %e, "cannot open taskbar settings");
+                }
+            }
             CMD_RESTART_TASKBAR => window::quit(EXIT_RESTART),
             CMD_QUIT => window::quit(EXIT_SHUTDOWN_ALL),
             CMD_SIGN_OUT => {
@@ -673,11 +994,11 @@ fn popup_menu(owner: HWND, items: &[(u32, &str)]) -> u32 {
         let Ok(menu) = CreatePopupMenu() else {
             return 0;
         };
-        for (id, text) in items {
+        let texts: Vec<Vec<u16>> = items.iter().map(|(_, t)| wide(t)).collect();
+        for ((id, _), w) in items.iter().zip(texts.iter()) {
             if *id == 0 {
                 let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
             } else {
-                let w = wide(text);
                 let _ = AppendMenuW(
                     menu,
                     MF_STRING,
@@ -787,9 +1108,10 @@ impl Handler for Bar {
                     // SAFETY: valid struct.
                     self.tracking = unsafe { TrackMouseEvent(&mut tme) }.is_ok();
                 }
-                let (h, _) = self.hit(lparam);
+                let h = self.hit(lparam);
                 if h != self.hover {
                     self.hover = h;
+                    self.update_tooltip(hwnd);
                     // SAFETY: repaint request on our own window.
                     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
                 }
@@ -799,13 +1121,18 @@ impl Handler for Bar {
                 self.tracking = false;
                 if self.hover != BarHit::Empty {
                     self.hover = BarHit::Empty;
+                    self.update_tooltip(hwnd);
                     // SAFETY: repaint request on our own window.
                     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
                 }
                 Some(LRESULT(0))
             }
             WM_LBUTTONUP => {
-                self.on_click(lparam);
+                self.on_click(lparam, false);
+                Some(LRESULT(0))
+            }
+            WM_LBUTTONDBLCLK => {
+                self.on_click(lparam, true);
                 Some(LRESULT(0))
             }
             WM_RBUTTONUP => {
@@ -813,6 +1140,7 @@ impl Handler for Bar {
                 Some(LRESULT(0))
             }
             WM_DESTROY => {
+                self.tooltip = None;
                 if let Some(mut ab) = self.appbar.take() {
                     ab.remove();
                 }
