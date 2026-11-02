@@ -29,6 +29,7 @@ Configuration lives in `%APPDATA%\explorer-rs\config.toml` (see
 
 - [Architecture](docs/ARCHITECTURE.md)
 - [Status](docs/STATUS.md)
+- [Installing on Windows](docs/INSTALL.md)
 - [Testing on Windows](docs/TESTING-ON-WINDOWS.md)
 - [Recovery](docs/RECOVERY.md)
 - [Design decisions](docs/decisions/)

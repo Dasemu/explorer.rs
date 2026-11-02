@@ -46,10 +46,10 @@ done
 for pdb in target/"$TARGET"/release/explorer_rs*.pdb target/"$TARGET"/release/explorer-rs*.pdb; do
     [[ -f "$pdb" ]] && cp "$pdb" "$DIST/"
 done
-cp scripts/install-shell.ps1 scripts/restore-explorer.ps1 "$DIST/scripts/"
+cp scripts/*.ps1 "$DIST/scripts/"
 cp config/default.toml "$DIST/config.example.toml"
 cp LICENSE "$DIST/"
-cp docs/RECOVERY.md docs/TESTING-ON-WINDOWS.md "$DIST/"
+cp docs/INSTALL.md docs/RECOVERY.md docs/TESTING-ON-WINDOWS.md "$DIST/"
 
 (cd dist && zip -qr "$(basename "$DIST").zip" "$(basename "$DIST")")
 echo "Built $DIST.zip"
