@@ -140,6 +140,11 @@ RECOVERY.md read. Do not do this on your daily machine yet.
    then sign out and in and confirm the normal desktop returns.
 7. If anything is stuck, roll back the snapshot.
 
+## File index (separate plan)
+
+The file-name index daemon has its own step-by-step plan:
+[TESTING-INDEX-ON-WINDOWS.md](TESTING-INDEX-ON-WINDOWS.md).
+
 ## What to send back
 
 - `dump-monitors.txt`, `dump-windows.txt`, `dump-apps.txt`

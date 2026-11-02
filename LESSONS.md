@@ -54,3 +54,43 @@ Non-obvious findings. Add an entry whenever something surprises you.
 - **Tooltips without a manifest:** comctl32 v5 is loaded unless the exe has
   a v6 manifest. Use `TTTOOLINFOW` V2 size (without `lpReserved`), and call
   `InitCommonControlsEx` first, or the class does not exist.
+
+## File index (crates/explorer-index, explorer-indexd)
+
+- **Synchronous pipe handles serialize I/O.** On a handle opened without
+  `FILE_FLAG_OVERLAPPED`, a `ReadFile` blocked in one thread makes a
+  `WriteFile` from another thread on the same handle wait. A duplex protocol
+  (reader thread + writer) therefore needs overlapped pipes; we wait on a
+  per-operation event to keep a blocking API, and `CancelIoEx` unblocks reads.
+- **Elevated pipe servers need an explicit medium integrity label.** Objects
+  created by a high-integrity process get a high mandatory label with
+  no-write-up, so the user's normal processes cannot open the pipe even though
+  the DACL allows them. The helper's SDDL adds `S:(ML;;NW;;;ME)`. (Expected
+  from documentation; unverified on Windows.)
+- **USN replay does not need rename pairing.** Every USN record carries the
+  file's current name and parent, so "upsert from any record except delete and
+  rename-old" is idempotent and handles create, rename, move and data changes
+  alike. Replaying a range twice is harmless, which makes crash recovery easy.
+- **MFT enumeration is in record-number order, not tree order.** Children come
+  before their parents. Collect everything, build child lists (CSR) by parent
+  record, then BFS from the root record (5); unreachable records (metafiles,
+  `$Extend`, orphans) fall out naturally.
+- **Load snapshots through the normal insert path.** Rebuilding costs ~0.25 s
+  per million entries, but a corrupted or malicious snapshot can then never
+  create cycles or dangling references, and the fuzzer has nothing to find in
+  cross-array consistency checks.
+- **Snapshot encoding runs under the read lock, so its cost matters.**
+  Restoring the original case bytewise instead of `chars().collect()` and
+  dropping a separate counting pass took 1M-entry encoding from 750 to 605 ms.
+- **Probing a Unix socket leaves a connection in the backlog.** "Is another
+  daemon alive?" via `connect()` makes the live daemon accept an empty
+  connection; harmless, but tests must expect it.
+- **Synthetic trees need unique sibling names.** Real file systems guarantee
+  them (case-insensitively on Windows); a generator that does not makes path
+  lookups descend into the wrong twin and looks like an index bug.
+- **`Modify`/`FullControl` include read bits.** An ACL check "is this file
+  writable by non-admins" must mask with write-only rights (`WriteData`,
+  `AppendData`, `Delete`, `ChangePermissions`, ...), or every reader is flagged.
+- **cargo-fuzz inside a nested checkout** (git worktree below the main repo)
+  picks up the parent directory's workspace; `fuzz/Cargo.toml` needs its own
+  `[workspace]` table.

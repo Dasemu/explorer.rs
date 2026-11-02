@@ -42,6 +42,14 @@ compiles for `x86_64-pc-windows-msvc` but has never run on Windows;
   - clock formatting;
   - log file creation;
   - supervisor CLI safety (no mode flag means no start).
+- File index (`explorer-index`, `explorer-indexd`, `explorer-index-client`):
+  index, queries and ranking (checked against brute force at 1M entries),
+  snapshots (round trip, every truncation and bit flip rejected), USN record
+  parsing and journal replay on a simulated NTFS volume (wrap, reset, rename,
+  move, delete, record reuse), walker, notification parsing, IPC framing,
+  helper RPC, daemon end-to-end over Unix sockets, client timeouts/cancel/
+  daemon-down. Fuzzed with cargo-fuzz (snapshot, ipc, records, query: 3 min
+  each, no crashes). Benchmarks: [INDEX.md](INDEX.md#performance).
 
 ## Unverified on Windows (everything below)
 
@@ -60,6 +68,7 @@ compiles for `x86_64-pc-windows-msvc` but has never run on Windows;
 | Icons | window icons (AUMID / WM_GETICON / class / exe), app icons via `IShellItemImageFactory`, alpha handling |
 | Tray | payload layout (V2+ offsets), dev-mode interception and forwarding, Z-order re-assertion, click semantics, icons of elevated apps, re-adding after `TaskbarCreated` |
 | Start menu | anchoring above the taskbar, pins and defaults, power menu (sleep via `SetSuspendState`), context menu, tooltips (comctl32 without a v6 manifest) |
+| Index | NTFS MFT enumeration and USN journal via `FSCTL_*` (direct and through `explorer-rs-index-helper`); helper pipe SDDL with medium label and client image check; daemon pipe DACL, `PIPE_REJECT_REMOTE_CLIENTS`, server-SID check; overlapped pipe I/O; `ReadDirectoryChangesW` watcher; fixed-drive discovery; access filtering of results; `scripts/install-index-helper.ps1` (never executed); launcher `file-index` feature. Test plan: [TESTING-INDEX-ON-WINDOWS.md](TESTING-INDEX-ON-WINDOWS.md) |
 | Features | `quick-settings` back-ends, `virtual-desktops` (winvd, undocumented COM), `tray` broadcast |
 
 ## Known broken / missing
@@ -80,3 +89,8 @@ compiles for `x86_64-pc-windows-msvc` but has never run on Windows;
 - A panic inside a window procedure aborts the process (Rust cannot unwind
   through `extern "system"`). The panic is logged first and the supervisor
   restarts the component.
+- File index: `indexd` is not in the default `supervisor.components` until
+  verified on Windows. No snapshot on logoff (`WM_ENDSESSION`); recovery relies
+  on periodic snapshots + journal catch-up. Hard links indexed once; no file
+  sizes for NTFS roots; overlapping roots indexed twice. One-letter, path and
+  fuzzy queries take 160-250 ms at 5M entries.

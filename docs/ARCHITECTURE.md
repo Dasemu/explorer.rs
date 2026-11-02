@@ -44,6 +44,9 @@ launcher may take the foreground.
 | `explorer-supervisor` | bin `explorer-rs` | process supervision | yes (CLI + policy) |
 | `explorer-taskbar` | bin `explorer-rs-taskbar` | taskbar UI | cross-compiled |
 | `explorer-launcher` | bin `explorer-rs-launcher` | launcher UI | cross-compiled |
+| `explorer-index` | lib | file-name index engine, queries, snapshots, USN/MFT parsing and replay, walker, IPC protocol; `win::` FSCTL backend and watcher | yes (Windows parts compile only) |
+| `explorer-indexd` | bins `explorer-rs-indexd`, `explorer-rs-index-helper` | index daemon + CLI, elevated MFT/USN helper | yes (daemon end-to-end over Unix sockets) |
+| `explorer-index-client` | lib | non-blocking index client | yes |
 
 Rule: decisions live in `explorer-core` as pure functions over plain data.
 `explorer-win` only collects data from the OS and executes actions. For
@@ -175,6 +178,15 @@ logged. Unknown keys are rejected, so typos are reported instead of being
 ignored. Panics are logged with a backtrace by a panic hook before the
 process dies.
 
+## File index
+
+`explorer-rs-indexd` keeps an Everything-style in-memory file-name index
+(NTFS MFT + USN journal through a minimal elevated helper, or folder walking +
+`ReadDirectoryChangesW`), persists it in checksummed snapshots and serves
+queries over a per-user named pipe. It is a known supervisor component
+(`indexd`) but not enabled by default. Details: [INDEX.md](INDEX.md),
+[IPC-PROTOCOL.md](IPC-PROTOCOL.md), ADRs 0010-0012.
+
 ## Feature flags
 
 The tray is no longer a feature flag; it is controlled by the `[tray]`
@@ -185,6 +197,7 @@ config section.
 | `quick-settings` | explorer-win, explorer-taskbar | battery, volume and connectivity back-ends implemented; no UI yet |
 | `virtual-desktops` | explorer-win, explorer-taskbar | thin `winvd` wrapper (undocumented COM); no UI yet |
 | `everything` | explorer-launcher | implemented, dynamic DLL load |
+| `file-index` | explorer-launcher | "Files" results from `explorer-rs-indexd`; wins over `everything` if both are on |
 
 ## Building
 
