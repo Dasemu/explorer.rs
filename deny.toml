@@ -9,6 +9,7 @@ targets = [
 ]
 
 [licenses]
+unused-allowed-license = "allow"
 version = 2
 # Licenses compatible with distributing a GPL-3.0-or-later combined work.
 allow = [
