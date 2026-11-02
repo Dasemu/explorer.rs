@@ -69,7 +69,7 @@ use crate::Args;
 
 const WM_APP_INDEXED: u32 = WM_APP + 10;
 const WM_APP_NAVKEY: u32 = WM_APP + 11;
-#[cfg(feature = "everything")]
+#[cfg(any(feature = "everything", feature = "file-index"))]
 const WM_APP_FILES: u32 = WM_APP + 12;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
@@ -120,7 +120,10 @@ enum View {
 enum RowKind {
     App,
     Shortcut,
-    #[cfg_attr(not(feature = "everything"), allow(dead_code))]
+    #[cfg_attr(
+        not(any(feature = "everything", feature = "file-index")),
+        allow(dead_code)
+    )]
     File,
 }
 
@@ -283,11 +286,11 @@ pub fn run(args: Args) -> i32 {
         launcher_msg: explorer_win::ipc::launcher_message(),
         query: String::new(),
         tracking: false,
-        #[cfg(feature = "everything")]
+        #[cfg(any(feature = "everything", feature = "file-index"))]
         files: None,
-        #[cfg(feature = "everything")]
+        #[cfg(any(feature = "everything", feature = "file-index"))]
         files_generation: 0,
-        #[cfg(feature = "everything")]
+        #[cfg(any(feature = "everything", feature = "file-index"))]
         file_rows: Vec::new(),
     };
     let hwnd = match window::create(
@@ -389,11 +392,11 @@ struct Launcher {
     launcher_msg: u32,
     query: String,
     tracking: bool,
-    #[cfg(feature = "everything")]
-    files: Option<crate::everything::EverythingWorker>,
-    #[cfg(feature = "everything")]
+    #[cfg(any(feature = "everything", feature = "file-index"))]
+    files: Option<crate::files::FileWorker>,
+    #[cfg(any(feature = "everything", feature = "file-index"))]
     files_generation: u64,
-    #[cfg(feature = "everything")]
+    #[cfg(any(feature = "everything", feature = "file-index"))]
     file_rows: Vec<Row>,
 }
 
@@ -580,14 +583,14 @@ impl Launcher {
                 );
                 #[allow(unused_mut)]
                 let mut rows: Vec<Row> = hits.iter().map(|h| Row::from_entry(h.entry)).collect();
-                #[cfg(feature = "everything")]
+                #[cfg(any(feature = "everything", feature = "file-index"))]
                 {
-                    if self.config.launcher.everything.enabled {
+                    if crate::files::enabled(&self.config) {
                         if self.files.is_none() {
-                            self.files = Some(crate::everything::EverythingWorker::start(
+                            self.files = Some(crate::files::FileWorker::start(
                                 hwnd,
                                 WM_APP_FILES,
-                                self.config.launcher.everything.max_results as u32,
+                                crate::files::max_results(&self.config),
                             ));
                         }
                         self.files_generation += 1;
@@ -1513,7 +1516,7 @@ impl Handler for Launcher {
                 }
                 Some(LRESULT(0))
             }
-            #[cfg(feature = "everything")]
+            #[cfg(any(feature = "everything", feature = "file-index"))]
             WM_APP_FILES => {
                 let mut changed = false;
                 if let Some(f) = &self.files {

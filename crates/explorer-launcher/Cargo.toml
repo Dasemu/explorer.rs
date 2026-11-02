@@ -16,6 +16,9 @@ default = []
 # File search through the Everything SDK (voidtools). Everything64.dll is
 # loaded dynamically at runtime; nothing is linked or redistributed.
 everything = []
+# "Files" results from the explorer.rs index daemon (explorer-rs-indexd).
+# Takes precedence over `everything` when both are enabled.
+file-index = ["dep:explorer-index-client"]
 
 [dependencies]
 explorer-core.workspace = true
@@ -23,6 +26,7 @@ explorer-win.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true
+explorer-index-client = { workspace = true, optional = true }
 
 [lints]
 workspace = true

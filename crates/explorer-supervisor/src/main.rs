@@ -42,7 +42,7 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
     /// Run only one component.
-    #[arg(long, value_name = "COMPONENT", value_parser = ["taskbar", "launcher"])]
+    #[arg(long, value_name = "COMPONENT", value_parser = ["taskbar", "launcher", "indexd"])]
     only: Option<String>,
 }
 

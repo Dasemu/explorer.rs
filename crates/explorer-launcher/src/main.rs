@@ -12,7 +12,13 @@ use clap::Parser;
 #[cfg(windows)]
 mod app;
 #[cfg(all(windows, feature = "everything"))]
+// With both features the index back-end wins; keep Everything compiled.
+#[cfg_attr(feature = "file-index", allow(dead_code))]
 mod everything;
+#[cfg(all(windows, feature = "file-index"))]
+mod file_index;
+#[cfg(all(windows, any(feature = "everything", feature = "file-index")))]
+mod files;
 
 #[derive(Parser, Debug)]
 #[command(name = "explorer-rs-launcher", version, about = "explorer.rs launcher")]
