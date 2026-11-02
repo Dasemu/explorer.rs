@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# explorer.rs default configuration.
+#
+# Copy this file to %APPDATA%\explorer-rs\config.toml and edit it.
+# Every key is optional: missing keys fall back to the values shown here.
+# Unknown keys are rejected so typos are reported in the log instead of
+# being silently ignored.
+
+[general]
+# Log verbosity: "error", "warn", "info", "debug" or "trace".
+# The EXPLORER_RS_LOG environment variable overrides this (tracing filter syntax).
+log_level = "info"
+# How many rotated daily log files to keep per component.
+log_keep_files = 7
+
+[taskbar]
+# Screen edge: "bottom" or "top".
+position = "bottom"
+# Height in logical pixels (scaled by the monitor DPI).
+height = 40
+# Which monitors get a taskbar: "all" or "primary".
+monitors = "all"
+# Only show windows that live on the taskbar's own monitor.
+windows_on_own_monitor_only = false
+# Width of a window button in logical pixels.
+button_width = 180
+# Show the clock.
+show_clock = true
+# strftime-like clock format. Supported: %H %M %S %I %p %d %m %Y %a %b.
+clock_format = "%H:%M"
+# Second line of the clock; empty string disables it.
+date_format = "%d/%m/%Y"
+# Window classes that must never appear on the taskbar (exact match).
+exclude_classes = []
+# Executable file names that must never appear on the taskbar (case-insensitive).
+exclude_processes = []
+
+[launcher]
+# Open the launcher when the Windows key is pressed and released alone.
+win_key_opens_launcher = true
+# Maximum number of results shown.
+max_results = 12
+# Extra folders scanned for shortcuts (.lnk, .url, .exe), in addition to
+# the Start Menu folders and shell:AppsFolder.
+extra_folders = []
+# Width/height of the launcher window in logical pixels.
+width = 640
+height = 460
+
+[launcher.everything]
+# File search through the Everything SDK (voidtools). Requires the binary to
+# be built with `--features everything` AND Everything to be running.
+enabled = false
+max_results = 5
+
+[supervisor]
+# Delay before the first restart of a crashed component (milliseconds).
+restart_initial_delay_ms = 500
+# Upper bound of the exponential restart backoff (milliseconds).
+restart_max_delay_ms = 30000
+# A component that crashes more than `crash_loop_max` times within
+# `crash_loop_window_s` seconds is given up on until the supervisor restarts.
+crash_loop_max = 5
+crash_loop_window_s = 60
+# Components to run. Remove one to disable it.
+components = ["taskbar", "launcher"]

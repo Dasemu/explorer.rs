@@ -1,0 +1,292 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//! Configuration model and TOML parsing.
+//!
+//! The documented default lives in `config/default.toml` at the repository
+//! root and is embedded in the binary. A test guarantees that the embedded
+//! file and `Config::default()` stay identical.
+
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+
+/// The documented default configuration file, embedded verbatim.
+pub const DEFAULT_CONFIG_TOML: &str = include_str!("../../../config/default.toml");
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("cannot read {path}: {source}")]
+    Io {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("invalid config: {0}")]
+    Parse(#[from] toml::de::Error),
+    #[error("invalid config value: {0}")]
+    Invalid(String),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Config {
+    pub general: GeneralConfig,
+    pub taskbar: TaskbarConfig,
+    pub launcher: LauncherConfig,
+    pub supervisor: SupervisorConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GeneralConfig {
+    pub log_level: String,
+    pub log_keep_files: usize,
+}
+
+impl Default for GeneralConfig {
+    fn default() -> Self {
+        Self {
+            log_level: "info".into(),
+            log_keep_files: 7,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Edge {
+    Bottom,
+    Top,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MonitorSelection {
+    All,
+    Primary,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TaskbarConfig {
+    pub position: Edge,
+    pub height: u32,
+    pub monitors: MonitorSelection,
+    pub windows_on_own_monitor_only: bool,
+    pub button_width: u32,
+    pub show_clock: bool,
+    pub clock_format: String,
+    pub date_format: String,
+    pub exclude_classes: Vec<String>,
+    pub exclude_processes: Vec<String>,
+}
+
+impl Default for TaskbarConfig {
+    fn default() -> Self {
+        Self {
+            position: Edge::Bottom,
+            height: 40,
+            monitors: MonitorSelection::All,
+            windows_on_own_monitor_only: false,
+            button_width: 180,
+            show_clock: true,
+            clock_format: "%H:%M".into(),
+            date_format: "%d/%m/%Y".into(),
+            exclude_classes: Vec::new(),
+            exclude_processes: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LauncherConfig {
+    pub win_key_opens_launcher: bool,
+    pub max_results: usize,
+    pub extra_folders: Vec<String>,
+    pub width: u32,
+    pub height: u32,
+    pub everything: EverythingConfig,
+}
+
+impl Default for LauncherConfig {
+    fn default() -> Self {
+        Self {
+            win_key_opens_launcher: true,
+            max_results: 12,
+            extra_folders: Vec::new(),
+            width: 640,
+            height: 460,
+            everything: EverythingConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EverythingConfig {
+    pub enabled: bool,
+    pub max_results: usize,
+}
+
+impl Default for EverythingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_results: 5,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SupervisorConfig {
+    pub restart_initial_delay_ms: u64,
+    pub restart_max_delay_ms: u64,
+    pub crash_loop_max: u32,
+    pub crash_loop_window_s: u64,
+    pub components: Vec<String>,
+}
+
+impl Default for SupervisorConfig {
+    fn default() -> Self {
+        Self {
+            restart_initial_delay_ms: 500,
+            restart_max_delay_ms: 30_000,
+            crash_loop_max: 5,
+            crash_loop_window_s: 60,
+            components: vec!["taskbar".into(), "launcher".into()],
+        }
+    }
+}
+
+/// Component names accepted in `supervisor.components`.
+pub const KNOWN_COMPONENTS: &[&str] = &["taskbar", "launcher"];
+
+impl Config {
+    /// Parse and validate a TOML document.
+    pub fn from_toml(s: &str) -> Result<Self, ConfigError> {
+        let cfg: Config = toml::from_str(s)?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// Load from a file. A missing file yields the default config; a broken
+    /// file is an error (the caller decides whether to fall back).
+    pub fn load(path: &Path) -> Result<Self, ConfigError> {
+        match std::fs::read_to_string(path) {
+            Ok(s) => Self::from_toml(&s),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(ConfigError::Io {
+                path: path.display().to_string(),
+                source: e,
+            }),
+        }
+    }
+
+    /// Load, falling back to defaults on any error. The error is returned
+    /// alongside so it can be logged once logging is up. A shell must start
+    /// even with a broken config file.
+    pub fn load_or_default(path: &Path) -> (Self, Option<ConfigError>) {
+        match Self::load(path) {
+            Ok(c) => (c, None),
+            Err(e) => (Self::default(), Some(e)),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        let t = &self.taskbar;
+        if !(16..=200).contains(&t.height) {
+            return Err(ConfigError::Invalid(format!(
+                "taskbar.height must be between 16 and 200, got {}",
+                t.height
+            )));
+        }
+        if !(40..=1000).contains(&t.button_width) {
+            return Err(ConfigError::Invalid(format!(
+                "taskbar.button_width must be between 40 and 1000, got {}",
+                t.button_width
+            )));
+        }
+        let l = &self.launcher;
+        if l.max_results == 0 || l.max_results > 100 {
+            return Err(ConfigError::Invalid(
+                "launcher.max_results must be between 1 and 100".into(),
+            ));
+        }
+        if l.width < 200 || l.height < 120 {
+            return Err(ConfigError::Invalid(
+                "launcher.width must be >= 200 and launcher.height >= 120".into(),
+            ));
+        }
+        let s = &self.supervisor;
+        if s.restart_initial_delay_ms == 0 || s.restart_initial_delay_ms > s.restart_max_delay_ms {
+            return Err(ConfigError::Invalid(
+                "supervisor.restart_initial_delay_ms must be > 0 and <= restart_max_delay_ms"
+                    .into(),
+            ));
+        }
+        for c in &s.components {
+            if !KNOWN_COMPONENTS.contains(&c.as_str()) {
+                return Err(ConfigError::Invalid(format!(
+                    "unknown component {c:?} in supervisor.components (known: {KNOWN_COMPONENTS:?})"
+                )));
+            }
+        }
+        match self.general.log_level.as_str() {
+            "error" | "warn" | "info" | "debug" | "trace" => {}
+            other => {
+                return Err(ConfigError::Invalid(format!(
+                    "general.log_level {other:?} is not one of error/warn/info/debug/trace"
+                )))
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_default_matches_struct_default() {
+        let parsed = Config::from_toml(DEFAULT_CONFIG_TOML).expect("default.toml must parse");
+        assert_eq!(parsed, Config::default());
+    }
+
+    #[test]
+    fn empty_file_is_default() {
+        assert_eq!(Config::from_toml("").unwrap(), Config::default());
+    }
+
+    #[test]
+    fn partial_override() {
+        let c = Config::from_toml("[taskbar]\nposition = \"top\"\nheight = 32\n").unwrap();
+        assert_eq!(c.taskbar.position, Edge::Top);
+        assert_eq!(c.taskbar.height, 32);
+        assert!(c.taskbar.show_clock);
+    }
+
+    #[test]
+    fn unknown_keys_rejected() {
+        assert!(Config::from_toml("[taskbar]\nheigth = 32\n").is_err());
+    }
+
+    #[test]
+    fn invalid_values_rejected() {
+        assert!(Config::from_toml("[taskbar]\nheight = 2\n").is_err());
+        assert!(Config::from_toml("[supervisor]\ncomponents = [\"tray\"]\n").is_err());
+        assert!(Config::from_toml("[general]\nlog_level = \"loud\"\n").is_err());
+    }
+
+    #[test]
+    fn missing_file_is_default_broken_file_falls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("config.toml");
+        assert_eq!(Config::load(&p).unwrap(), Config::default());
+        std::fs::write(&p, "this is not toml = = =").unwrap();
+        let (c, err) = Config::load_or_default(&p);
+        assert_eq!(c, Config::default());
+        assert!(err.is_some());
+    }
+}
