@@ -84,6 +84,36 @@ Checklist (record pass / fail / notes for each):
     is released (maximized windows use the full screen briefly) and the taskbar
     comes back.
 
+Round 2 additions (after the first report):
+
+15. Icons: each taskbar button shows the app's icon (classic app, UWP app
+    like Calculator/Settings, File Explorer). Hovering shows the window title.
+16. Alignment: the taskbar follows Settings > Personalization > Taskbar >
+    Taskbar behaviors > Taskbar alignment. Change it while explorer.rs runs:
+    the bar updates within a second.
+17. Theme: switch Settings > Personalization > Colors between Dark and Light,
+    change the accent colour, and toggle "Show accent color on Start and
+    taskbar". The taskbar and Start follow live.
+18. Start button: clicking it opens Start; clicking it again closes it
+    (it must NOT reopen). Win key toggles it too.
+19. Start menu:
+    - It sits above the taskbar, centred or left like the taskbar.
+    - Pinned apps show icons. "All apps >" lists everything alphabetically
+      with letter headers. Typing switches to search results.
+    - Right-click an app → Pin to Start / Unpin / Move to front work and
+      survive a restart.
+    - The power button menu shows Lock / Sign out / Sleep / Shut down /
+      Restart. Test only Lock.
+20. No duplicate apps (e.g. "Command Prompt" and "Símbolo del sistema").
+21. Tray:
+    - Icons of running apps appear at the right of our taskbar (volume,
+      network, OneDrive, Steam…).
+    - Left-click and right-click an app's icon (e.g. OneDrive): its window or
+      menu opens.
+    - explorer's own tray keeps working too.
+    - If anything misbehaves, set `[tray] intercept_in_dev_mode = false`
+      and report it.
+
 Component exit codes, for reference: 0 = intentional stop (not restarted),
 77 = quit all of explorer.rs, 78 = restart me.
 
@@ -148,6 +178,13 @@ dump-apps:     <ok / problem + notes>
 12 Launch classic app:                       PASS / FAIL / notes:
 13 Kill launcher -> comes back:              PASS / FAIL / notes:
 14 Kill taskbar -> space freed, comes back:  PASS / FAIL / notes:
+15 Taskbar icons + hover titles:             PASS / FAIL / notes:
+16 Alignment follows Windows setting:        PASS / FAIL / notes:
+17 Dark/light + accent, live:                PASS / FAIL / notes:
+18 Start button toggles (no reopen):         PASS / FAIL / notes:
+19 Start menu (pins, All apps, search, power): PASS / FAIL / notes:
+20 No duplicate apps:                        PASS / FAIL / notes:
+21 Tray icons + clicks:                      PASS / FAIL / notes:
 
 ## Phase 3 (VM only, optional)
 Install: PASS / FAIL / notes:

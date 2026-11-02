@@ -23,3 +23,9 @@ depending on Windows Search or explorer.exe.
   thread.
 - Display-name merge can occasionally keep two entries for the same app with
   different names; acceptable for now.
+
+## Amendment (2026-11-02)
+Testing on Windows 11 25H2 (Spanish) showed duplicates: the `.lnk` file names
+in the Start Menu are English, but Windows displays localized names. The
+Start Menu scan is now only a fallback when `shell:AppsFolder` enumeration
+fails or returns nothing.

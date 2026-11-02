@@ -36,3 +36,21 @@ Non-obvious findings. Add an entry whenever something surprises you.
 - **cargo-xwin** works with the stable toolchain in the container. The first
   *link* downloads the MSVC CRT/SDK (cached afterwards); `check`/`clippy` do
   not need it.
+- **Start Menu `.lnk` names are not what users see.** Windows localizes them
+  via `desktop.ini` (`LocalizedResourceName`), so scanning the folders shows
+  "Command Prompt" on a Spanish system that displays "Símbolo del sistema".
+  `shell:AppsFolder` returns the localized names; use it as the source.
+- **PowerShell StrictMode + registry:** `(Get-ItemProperty key).PSObject.Properties.Name`
+  throws `PropertyNotFoundStrict` when the key has no values. Read values
+  through `(Get-Item key).GetValueNames()` / `.GetValue()` instead.
+- **Toggling a popup from a button that deactivates it:** the mouse-down on
+  the Start button deactivates (and hides) the menu before the click's
+  Toggle arrives, which then reopens it. Remember when we hid on
+  deactivation and ignore a Toggle within ~400 ms.
+- **Tray in dev mode:** `Shell_NotifyIcon` uses `FindWindow("Shell_TrayWnd")`,
+  which returns the first window in Z order. A second, topmost
+  `Shell_TrayWnd` that forwards everything to explorer's lets a dev-mode
+  taskbar see tray icons without breaking explorer.
+- **Tooltips without a manifest:** comctl32 v5 is loaded unless the exe has
+  a v6 manifest. Use `TTTOOLINFOW` V2 size (without `lpReserved`), and call
+  `InitCommonControlsEx` first, or the class does not exist.
