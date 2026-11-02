@@ -1,8 +1,28 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 [package]
 name = "explorer-taskbar"
+description = "explorer.rs taskbar: per-monitor AppBar with window list and clock."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+
+[[bin]]
+name = "explorer-rs-taskbar"
+path = "src/main.rs"
+
+[features]
+default = []
+quick-settings = ["explorer-win/quick-settings"]
+tray = ["explorer-win/tray"]
+virtual-desktops = ["explorer-win/virtual-desktops"]
+
 [dependencies]
+explorer-core.workspace = true
+explorer-win.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
