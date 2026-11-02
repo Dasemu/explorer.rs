@@ -34,6 +34,7 @@ pub struct Config {
     pub tray: TrayConfig,
     pub launcher: LauncherConfig,
     pub supervisor: SupervisorConfig,
+    pub index: IndexConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -211,7 +212,60 @@ impl Default for SupervisorConfig {
 }
 
 /// Component names accepted in `supervisor.components`.
-pub const KNOWN_COMPONENTS: &[&str] = &["taskbar", "launcher"];
+///
+/// `indexd` is known but not in the default list until it is verified on
+/// Windows; see docs/INDEX.md for how to enable it.
+pub const KNOWN_COMPONENTS: &[&str] = &["taskbar", "launcher", "indexd"];
+
+/// File-name index daemon (`explorer-rs-indexd`) settings. See docs/INDEX.md.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct IndexConfig {
+    /// Folders or volumes to index (e.g. `"C:\\"`, `"D:\\Data"`). Empty means
+    /// every fixed local volume on Windows and the home directory elsewhere.
+    pub roots: Vec<String>,
+    /// Use the NTFS master file table and USN change journal when possible
+    /// (requires the elevated helper, see docs/decisions/0010). When false or
+    /// unavailable, folders are walked and watched instead.
+    pub use_ntfs: bool,
+    /// File or folder names never indexed (case-insensitive, exact name or
+    /// `*` wildcards).
+    pub exclude_names: Vec<String>,
+    /// Path prefixes never indexed (case-insensitive).
+    pub exclude_paths: Vec<String>,
+    /// Hide results whose parent folder the current user cannot list.
+    pub check_access: bool,
+    /// Seconds between periodic snapshot saves (0 disables periodic saves;
+    /// a snapshot is still written on clean shutdown).
+    pub snapshot_interval_s: u64,
+    /// Seconds between full rescans of walked (non-NTFS) roots that cannot be
+    /// watched for changes. 0 disables periodic rescans.
+    pub rescan_interval_s: u64,
+    /// Upper bound for `limit` in a single query.
+    pub max_query_results: usize,
+    /// Number of "Files" results shown in the launcher (feature `file-index`).
+    pub launcher_results: usize,
+}
+
+impl Default for IndexConfig {
+    fn default() -> Self {
+        Self {
+            roots: Vec::new(),
+            use_ntfs: true,
+            exclude_names: vec![
+                "$Recycle.Bin".into(),
+                "System Volume Information".into(),
+                "$WinREAgent".into(),
+            ],
+            exclude_paths: Vec::new(),
+            check_access: true,
+            snapshot_interval_s: 600,
+            rescan_interval_s: 3600,
+            max_query_results: 1000,
+            launcher_results: 5,
+        }
+    }
+}
 
 impl Config {
     /// Parse and validate a TOML document.
@@ -283,6 +337,17 @@ impl Config {
                 )));
             }
         }
+        let i = &self.index;
+        if i.max_query_results == 0 || i.max_query_results > 100_000 {
+            return Err(ConfigError::Invalid(
+                "index.max_query_results must be between 1 and 100000".into(),
+            ));
+        }
+        if i.launcher_results > 50 {
+            return Err(ConfigError::Invalid(
+                "index.launcher_results must be at most 50".into(),
+            ));
+        }
         match self.general.log_level.as_str() {
             "error" | "warn" | "info" | "debug" | "trace" => {}
             other => {
@@ -328,6 +393,19 @@ mod tests {
         assert!(Config::from_toml("[taskbar]\nheight = 2\n").is_err());
         assert!(Config::from_toml("[supervisor]\ncomponents = [\"tray\"]\n").is_err());
         assert!(Config::from_toml("[general]\nlog_level = \"loud\"\n").is_err());
+        assert!(Config::from_toml("[index]\nmax_query_results = 0\n").is_err());
+    }
+
+    #[test]
+    fn indexd_is_known_but_not_default() {
+        assert!(KNOWN_COMPONENTS.contains(&"indexd"));
+        assert!(!Config::default()
+            .supervisor
+            .components
+            .contains(&"indexd".to_string()));
+        let c =
+            Config::from_toml("[supervisor]\ncomponents = [\"taskbar\", \"indexd\"]\n").unwrap();
+        assert_eq!(c.supervisor.components.len(), 2);
     }
 
     #[test]

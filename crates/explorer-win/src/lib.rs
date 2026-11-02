@@ -29,6 +29,10 @@ pub mod keyboard;
 #[cfg(windows)]
 pub mod monitors;
 #[cfg(windows)]
+pub mod pipe;
+#[cfg(windows)]
+pub mod security;
+#[cfg(windows)]
 pub mod shellhook;
 #[cfg(windows)]
 pub mod single_instance;

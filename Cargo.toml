@@ -7,7 +7,10 @@ members = [
     "crates/explorer-taskbar",
     "crates/explorer-launcher",
     "crates/explorer-supervisor",
+    "crates/explorer-index",
+    "crates/explorer-index-client",
 ]
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -19,6 +22,8 @@ rust-version = "1.85"
 [workspace.dependencies]
 explorer-core = { path = "crates/explorer-core" }
 explorer-win = { path = "crates/explorer-win" }
+explorer-index = { path = "crates/explorer-index" }
+explorer-index-client = { path = "crates/explorer-index-client" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
@@ -31,6 +36,11 @@ clap = { version = "4", features = ["derive"] }
 tempfile = "3"
 windows = "0.62"
 winvd = "0.0.49"
+memchr = "2"
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+crc32fast = "1"
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+proptest = { version = "1", default-features = false, features = ["std"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"

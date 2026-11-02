@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "explorer-index"
+description = "File-name index engine for explorer.rs: in-memory index, queries, snapshots, NTFS/USN and directory-walk sources, IPC protocol."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+explorer-core.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+tracing.workspace = true
+nucleo-matcher.workspace = true
+memchr.workspace = true
+postcard.workspace = true
+crc32fast.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+explorer-win.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+criterion.workspace = true
+proptest.workspace = true
+
+[[bench]]
+name = "index"
+harness = false
+
+[lints]
+workspace = true

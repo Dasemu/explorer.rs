@@ -78,5 +78,32 @@ restart_max_delay_ms = 30000
 # `crash_loop_window_s` seconds is given up on until the supervisor restarts.
 crash_loop_max = 5
 crash_loop_window_s = 60
-# Components to run. Remove one to disable it.
+# Components to run. Remove one to disable it. Known components:
+# "taskbar", "launcher", "indexd" (file-name index daemon; not enabled by
+# default until verified on Windows, see docs/INDEX.md).
 components = ["taskbar", "launcher"]
+
+[index]
+# Settings of the file-name index daemon (explorer-rs-indexd).
+# Folders or volumes to index, e.g. ["C:\\", "D:\\Data"]. Empty means every
+# fixed local volume on Windows (the home directory on other systems).
+roots = []
+# Read the NTFS master file table and follow the USN change journal. This
+# needs the elevated helper (docs/decisions/0010-index-privilege-model.md).
+# Without it, folders are walked and watched instead (slower start-up).
+use_ntfs = true
+# Names never indexed (case-insensitive; `*` wildcards allowed).
+exclude_names = ["$Recycle.Bin", "System Volume Information", "$WinREAgent"]
+# Path prefixes never indexed (case-insensitive), e.g. ["C:\\Windows\\WinSxS"].
+exclude_paths = []
+# Hide results inside folders the current user cannot list. An MFT index
+# sees every file name on the volume regardless of permissions.
+check_access = true
+# Seconds between periodic snapshot saves (0 = only on shutdown).
+snapshot_interval_s = 600
+# Seconds between full rescans of walked roots that cannot be watched (0 = never).
+rescan_interval_s = 3600
+# Largest page a client may request in one query.
+max_query_results = 1000
+# Number of "Files" results in the launcher (needs the `file-index` feature).
+launcher_results = 5
