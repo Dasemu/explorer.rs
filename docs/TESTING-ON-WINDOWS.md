@@ -31,12 +31,14 @@ Open PowerShell in the folder with the binaries for the commands below.
 
 ## Phase 1: diagnostics only
 
-These print information and exit. Redirect the output to text files:
+These write information to a text file and exit. The binaries are
+GUI-subsystem programs, so always use `--output` rather than `>` redirection,
+and wait a couple of seconds for each file to appear:
 
 ```
-.\explorer-rs-taskbar.exe --dump-monitors > dump-monitors.txt 2>&1
-.\explorer-rs-taskbar.exe --dump-windows  > dump-windows.txt 2>&1
-.\explorer-rs-launcher.exe --dump-apps    > dump-apps.txt 2>&1
+.\explorer-rs-taskbar.exe --dump-monitors --output dump-monitors.txt
+.\explorer-rs-taskbar.exe --dump-windows  --output dump-windows.txt
+.\explorer-rs-launcher.exe --dump-apps    --output dump-apps.txt
 ```
 
 Before `--dump-windows`, open Notepad, Settings, Calculator, and a File
@@ -52,8 +54,10 @@ and windows listed? Are the "shown / why not" reasons plausible?
 Dev mode runs alongside explorer.exe. The taskbar is a normal AppBar and the
 launcher is a normal window. Logs go to
 `%LOCALAPPDATA%\explorer-rs\logs\`. For more detail set `EXPLORER_RS_LOG=debug`
-before starting. Stop with Ctrl+C in the console, or by ending the processes in
-Task Manager.
+before starting. Stop it by right-clicking an empty area of the explorer.rs taskbar and
+choosing **Quit explorer.rs**, or by ending `explorer-rs.exe` in Task Manager
+(its children are in a kill-on-close job object and exit with it). Ctrl+C in
+the console that started it should also work but is unverified.
 
 Checklist (record pass / fail / notes for each):
 
