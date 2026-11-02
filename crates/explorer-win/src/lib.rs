@@ -19,6 +19,8 @@ pub mod dpi;
 #[cfg(windows)]
 pub mod gfx;
 #[cfg(windows)]
+pub mod icons;
+#[cfg(windows)]
 pub mod ipc;
 #[cfg(windows)]
 pub mod job;
@@ -31,7 +33,11 @@ pub mod shellhook;
 #[cfg(windows)]
 pub mod single_instance;
 #[cfg(windows)]
+pub mod theme;
+#[cfg(windows)]
 pub mod time;
+#[cfg(windows)]
+pub mod tooltip;
 #[cfg(windows)]
 pub mod util;
 #[cfg(windows)]
@@ -43,7 +49,7 @@ pub mod winlist;
 pub mod console;
 #[cfg(all(windows, feature = "quick-settings"))]
 pub mod quick_settings;
-#[cfg(all(windows, feature = "tray"))]
+#[cfg(windows)]
 pub mod tray;
 #[cfg(all(windows, feature = "virtual-desktops"))]
 pub mod vdesk;

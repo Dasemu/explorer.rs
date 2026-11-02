@@ -9,14 +9,17 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use anyhow::Result;
+use explorer_core::image::SharedImage;
 use explorer_core::layout::Rect;
 use windows::core::w;
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
+    D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
+    D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
+    D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
+    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES,
     D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_FACTORY_TYPE_SINGLE_THREADED,
     D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES,
     D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_ROUNDED_RECT,
@@ -46,21 +49,6 @@ impl Color {
     }
 }
 
-/// Neutral dark palette, close to Windows 11 dark mode.
-pub mod theme {
-    use super::Color;
-    pub const BAR_BG: Color = Color(0x202020);
-    pub const BUTTON_BG: Color = Color(0x2b2b2b);
-    pub const BUTTON_HOVER: Color = Color(0x383838);
-    pub const BUTTON_ACTIVE: Color = Color(0x454545);
-    pub const ACCENT: Color = Color(0x4cc2ff);
-    pub const FLASH: Color = Color(0xc27c0e);
-    pub const TEXT: Color = Color(0xffffff);
-    pub const TEXT_DIM: Color = Color(0xa0a0a0);
-    pub const PANEL_BG: Color = Color(0x2c2c2c);
-    pub const SELECTION: Color = Color(0x3d3d3d);
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Align {
     Left,
@@ -68,10 +56,31 @@ pub enum Align {
     Right,
 }
 
+/// Font used for UI glyphs (power, search, chevrons...).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Font {
+    Text,
+    Icons,
+}
+
+/// Well-known glyphs of "Segoe Fluent Icons" / "Segoe MDL2 Assets"
+/// (same code points in both).
+pub mod glyph {
+    pub const POWER: &str = "\u{E7E8}";
+    pub const SEARCH: &str = "\u{E721}";
+    pub const SETTINGS: &str = "\u{E713}";
+    pub const USER: &str = "\u{E77B}";
+    pub const CHEVRON_RIGHT: &str = "\u{E76C}";
+    pub const CHEVRON_LEFT: &str = "\u{E76B}";
+    pub const CHEVRON_UP: &str = "\u{E70E}";
+    pub const APP: &str = "\u{ECAA}";
+}
+
 pub struct Gfx {
     d2d: ID2D1Factory,
     dwrite: IDWriteFactory,
-    formats: RefCell<HashMap<(u32, bool, Align), IDWriteTextFormat>>,
+    icon_family: Vec<u16>,
+    formats: RefCell<HashMap<(Font, u32, bool, Align), IDWriteTextFormat>>,
 }
 
 impl Gfx {
@@ -80,14 +89,50 @@ impl Gfx {
         unsafe {
             Ok(Self {
                 d2d: D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?,
-                dwrite: DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?,
+                dwrite: {
+                    let f: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+                    f
+                },
+                icon_family: Vec::new(),
                 formats: RefCell::new(HashMap::new()),
+            })
+            .map(|mut g: Self| {
+                g.icon_family = g.pick_icon_family();
+                g
             })
         }
     }
 
-    fn format(&self, size: f32, bold: bool, align: Align) -> Option<IDWriteTextFormat> {
-        let key = ((size * 4.0) as u32, bold, align);
+    /// "Segoe Fluent Icons" (Windows 11) or "Segoe MDL2 Assets" (Windows 10).
+    fn pick_icon_family(&self) -> Vec<u16> {
+        let fluent = crate::util::wide("Segoe Fluent Icons");
+        // SAFETY: DirectWrite queries with valid out-pointers.
+        let has_fluent = unsafe {
+            let mut coll = None;
+            self.dwrite
+                .GetSystemFontCollection(&mut coll, false)
+                .is_ok()
+                && coll.is_some_and(|c| {
+                    let mut idx = 0u32;
+                    let mut exists = windows::core::BOOL(0);
+                    c.FindFamilyName(
+                        windows::core::PCWSTR(fluent.as_ptr()),
+                        &mut idx,
+                        &mut exists,
+                    )
+                    .is_ok()
+                        && exists.as_bool()
+                })
+        };
+        if has_fluent {
+            fluent
+        } else {
+            crate::util::wide("Segoe MDL2 Assets")
+        }
+    }
+
+    fn format(&self, font: Font, size: f32, bold: bool, align: Align) -> Option<IDWriteTextFormat> {
+        let key = (font, (size * 4.0) as u32, bold, align);
         if let Some(f) = self.formats.borrow().get(&key) {
             return Some(f.clone());
         }
@@ -96,7 +141,10 @@ impl Gfx {
             let f = self
                 .dwrite
                 .CreateTextFormat(
-                    w!("Segoe UI"),
+                    match font {
+                        Font::Text => w!("Segoe UI Variable Text"),
+                        Font::Icons => windows::core::PCWSTR(self.icon_family.as_ptr()),
+                    },
                     None,
                     if bold {
                         DWRITE_FONT_WEIGHT_SEMI_BOLD
@@ -134,6 +182,9 @@ impl Gfx {
 pub struct Surface {
     hwnd: HWND,
     target: Option<(ID2D1HwndRenderTarget, ID2D1SolidColorBrush)>,
+    /// GPU copies of CPU images, keyed by `Image::id`. Cleared with the
+    /// render target.
+    bitmaps: RefCell<HashMap<u64, ID2D1Bitmap>>,
 }
 
 fn client_size(hwnd: HWND) -> D2D_SIZE_U {
@@ -148,7 +199,11 @@ fn client_size(hwnd: HWND) -> D2D_SIZE_U {
 
 impl Surface {
     pub fn new(hwnd: HWND) -> Self {
-        Self { hwnd, target: None }
+        Self {
+            hwnd,
+            target: None,
+            bitmaps: RefCell::new(HashMap::new()),
+        }
     }
 
     /// Call from WM_SIZE.
@@ -183,10 +238,17 @@ impl Surface {
                 gfx.d2d
                     .CreateHwndRenderTarget(&props, &hprops)
                     .and_then(|rt| {
-                        let b = rt.CreateSolidColorBrush(&theme::TEXT.d2d(), None)?;
+                        let white = D2D1_COLOR_F {
+                            r: 1.0,
+                            g: 1.0,
+                            b: 1.0,
+                            a: 1.0,
+                        };
+                        let b = rt.CreateSolidColorBrush(&white, None)?;
                         Ok((rt, b))
                     })
             };
+            self.bitmaps.borrow_mut().clear();
             match created {
                 Ok(t) => self.target = Some(t),
                 Err(e) => {
@@ -207,10 +269,14 @@ impl Surface {
         let result = unsafe {
             rt.BeginDraw();
             rt.Clear(Some(&bg.d2d()));
+            if self.bitmaps.borrow().len() > 512 {
+                self.bitmaps.borrow_mut().clear();
+            }
             f(&Painter {
                 rt: &rt,
                 brush: &brush,
                 gfx,
+                bitmaps: &self.bitmaps,
             });
             rt.EndDraw(None, None)
         };
@@ -226,6 +292,7 @@ pub struct Painter<'a> {
     rt: &'a ID2D1HwndRenderTarget,
     brush: &'a ID2D1SolidColorBrush,
     gfx: &'a Gfx,
+    bitmaps: &'a RefCell<HashMap<u64, ID2D1Bitmap>>,
 }
 
 fn d2r(r: Rect) -> D2D_RECT_F {
@@ -261,9 +328,115 @@ impl Painter<'_> {
         }
     }
 
+    /// 1-px (scaled) outline of a rounded rectangle.
+    pub fn stroke_rounded(&self, r: Rect, radius: f32, width: f32, c: Color) {
+        // SAFETY: drawing on a target inside BeginDraw.
+        unsafe {
+            self.brush.SetColor(&c.d2d());
+            self.rt.DrawRoundedRectangle(
+                &D2D1_ROUNDED_RECT {
+                    rect: d2r(r),
+                    radiusX: radius,
+                    radiusY: radius,
+                },
+                self.brush,
+                width,
+                None,
+            );
+        }
+    }
+
+    /// Run `f` with drawing clipped to `r`.
+    pub fn clipped(&self, r: Rect, f: impl FnOnce(&Self)) {
+        // SAFETY: balanced push/pop on a target inside BeginDraw.
+        unsafe {
+            self.rt
+                .PushAxisAlignedClip(&d2r(r), D2D1_ANTIALIAS_MODE_ALIASED);
+        }
+        f(self);
+        // SAFETY: matches the push above.
+        unsafe { self.rt.PopAxisAlignedClip() };
+    }
+
+    /// Draw an image scaled into `r` (aspect preserved, centred).
+    pub fn image(&self, img: &SharedImage, r: Rect) {
+        let bmp = {
+            let cached = self.bitmaps.borrow().get(&img.id).cloned();
+            match cached {
+                Some(b) => b,
+                None => {
+                    let props = D2D1_BITMAP_PROPERTIES {
+                        pixelFormat: D2D1_PIXEL_FORMAT {
+                            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                        },
+                        dpiX: 96.0,
+                        dpiY: 96.0,
+                    };
+                    // SAFETY: pixel buffer matches width*height*4 with the
+                    // given pitch.
+                    let created = unsafe {
+                        self.rt.CreateBitmap(
+                            D2D_SIZE_U {
+                                width: img.width,
+                                height: img.height,
+                            },
+                            Some(img.pixels.as_ptr() as *const core::ffi::c_void),
+                            img.width * 4,
+                            &props,
+                        )
+                    };
+                    match created {
+                        Ok(b) => {
+                            self.bitmaps.borrow_mut().insert(img.id, b.clone());
+                            b
+                        }
+                        Err(_) => return,
+                    }
+                }
+            }
+        };
+        let side = r.w.min(r.h);
+        let dst = Rect::new(
+            r.x + (r.w - side) / 2.0,
+            r.y + (r.h - side) / 2.0,
+            side,
+            side,
+        );
+        // SAFETY: drawing on a target inside BeginDraw.
+        unsafe {
+            self.rt.DrawBitmap(
+                &bmp,
+                Some(&d2r(dst)),
+                1.0,
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                None,
+            );
+        }
+    }
+
+    /// Glyph from the system icon font.
+    pub fn glyph(&self, g: &str, r: Rect, size: f32, c: Color) {
+        self.text_with(Font::Icons, g, r, size, c, Align::Center, false);
+    }
+
     /// Single line of text, vertically centred in `r`, ellipsised.
     pub fn text(&self, s: &str, r: Rect, size: f32, c: Color, align: Align, bold: bool) {
-        let Some(fmt) = self.gfx.format(size, bold, align) else {
+        self.text_with(Font::Text, s, r, size, c, align, bold);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn text_with(
+        &self,
+        font: Font,
+        s: &str,
+        r: Rect,
+        size: f32,
+        c: Color,
+        align: Align,
+        bold: bool,
+    ) {
+        let Some(fmt) = self.gfx.format(font, size, bold, align) else {
             return;
         };
         let utf16: Vec<u16> = s.encode_utf16().collect();
