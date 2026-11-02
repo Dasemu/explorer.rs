@@ -8,6 +8,7 @@ members = [
     "crates/explorer-launcher",
     "crates/explorer-supervisor",
     "crates/explorer-index",
+    "crates/explorer-indexd",
     "crates/explorer-index-client",
 ]
 exclude = ["fuzz"]

@@ -353,6 +353,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "explorer-indexd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "explorer-core",
+ "explorer-index",
+ "explorer-index-client",
+ "explorer-win",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "explorer-launcher"
 version = "0.1.0"
 dependencies = [
