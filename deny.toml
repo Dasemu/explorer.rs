@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# cargo-deny configuration (schema version 2).
+# Run: cargo deny check licenses bans sources
+
+[graph]
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+]
+
+[licenses]
+version = 2
+# Licenses compatible with distributing a GPL-3.0-or-later combined work.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "MPL-2.0",
+    "GPL-3.0-or-later",
+    "GPL-3.0",
+    "LGPL-3.0",
+    "CC0-1.0",
+    "0BSD",
+    "BSL-1.0",
+]
+confidence-threshold = 0.8
+# Workspace crates declare GPL-3.0-or-later, so they pass the allow-list
+# and no `[licenses.private]` exception is needed.
+
+[advisories]
+version = 2
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
