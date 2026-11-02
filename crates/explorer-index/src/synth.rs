@@ -96,9 +96,19 @@ impl Rng {
     }
 }
 
-/// Generate a tree with about `n` entries (about 8% folders).
+fn sibling_key(parent: u32, name: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    parent.hash(&mut h);
+    name.to_lowercase().hash(&mut h);
+    h.finish()
+}
+
+/// Generate a tree with exactly `n` entries (about 8% folders). Sibling
+/// names are unique case-insensitively, as on a real file system.
 pub fn tree(n: usize, seed: u64) -> ScannedTree {
     let mut rng = Rng::new(seed);
+    let mut taken = std::collections::HashSet::with_capacity(n);
     let mut t = ScannedTree::default();
     let mut dirs: Vec<u32> = vec![NONE];
     let mut name = String::new();
@@ -130,6 +140,11 @@ pub fn tree(n: usize, seed: u64) -> ScannedTree {
         if !is_dir {
             name.push('.');
             name.push_str(EXTS[rng.below(EXTS.len() as u64) as usize]);
+        }
+        let mut k = 2;
+        while !taken.insert(sibling_key(parent, &name)) {
+            name.insert_str(0, &format!("({k}) "));
+            k += 1;
         }
         let size = (!is_dir).then(|| rng.below(1 << 24));
         let i = t.push(parent, &name, is_dir, size, NONE);

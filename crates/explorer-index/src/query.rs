@@ -388,14 +388,20 @@ impl<'a> Eval<'a> {
     }
 
     /// Score of `id` if it matches every term.
-    fn check(&mut self, id: EntryId) -> Option<u32> {
+    /// `known` = (term index, match position) already found by the arena
+    /// scan, so the driver term is not searched again.
+    fn check(&mut self, id: EntryId, known: Option<(usize, usize)>) -> Option<u32> {
         let ix = self.ix;
         let q = self.q;
         let name = ix.folded_name(id);
         let mut score: u32 = 0;
         for (t, term) in q.terms.iter().enumerate() {
             let (ok, s) = match &term.kind {
-                Kind::Contains(v) => match self.finders[t].as_ref().and_then(|f| f.find(name)) {
+                Kind::Contains(v) => match known
+                    .filter(|&(k, _)| k == t)
+                    .map(|(_, p)| p)
+                    .or_else(|| self.finders[t].as_ref().and_then(|f| f.find(name)))
+                {
                     Some(p) if name.len() == v.len() => (true, 1000 + p as u32),
                     Some(0) => (true, 500),
                     Some(p) if word_boundary(name, p) => (true, 200),
@@ -475,19 +481,20 @@ pub fn search(
     let mut ev = Eval::new(ix, q);
     let mut hits: Vec<(u64, EntryId)> = Vec::new();
     let mut steps: u32 = 0;
-    let mut visit = |id: EntryId, ev: &mut Eval<'_>| -> Result<(), QueryError> {
-        steps = steps.wrapping_add(1);
-        if steps % 8192 == 0 && cancel.load(Ordering::Relaxed) {
-            return Err(QueryError::Cancelled);
-        }
-        if ix.is_root(id) {
-            return Ok(());
-        }
-        if let Some(s) = ev.check(id) {
-            hits.push((sort_key(ix, id, s), id));
-        }
-        Ok(())
-    };
+    let mut visit =
+        |id: EntryId, known: Option<(usize, usize)>, ev: &mut Eval<'_>| -> Result<(), QueryError> {
+            steps = steps.wrapping_add(1);
+            if steps % 8192 == 0 && cancel.load(Ordering::Relaxed) {
+                return Err(QueryError::Cancelled);
+            }
+            if ix.is_root(id) {
+                return Ok(());
+            }
+            if let Some(s) = ev.check(id, known) {
+                hits.push((sort_key(ix, id, s), id));
+            }
+            Ok(())
+        };
     match q.driver() {
         Some(d) => {
             let needle: &[u8] = match &q.terms[d].kind {
@@ -503,17 +510,17 @@ pub fn search(
                     break;
                 };
                 seg = ix.seg_at(from + p, seg);
-                let (_, end) = ix.seg_bounds(seg);
+                let (start, end) = ix.seg_bounds(seg);
                 let id = ix.seg_owner(seg);
                 if id != NONE {
-                    visit(id, &mut ev)?;
+                    visit(id, Some((d, from + p - start)), &mut ev)?;
                 }
                 from = end + 1;
             }
         }
         None => {
             for id in ix.live_ids() {
-                visit(id, &mut ev)?;
+                visit(id, None, &mut ev)?;
             }
         }
     }
