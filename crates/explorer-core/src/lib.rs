@@ -8,6 +8,7 @@
 pub mod catalog;
 pub mod clock;
 pub mod config;
+pub mod dump;
 pub mod hotkey;
 pub mod ipc;
 pub mod layout;

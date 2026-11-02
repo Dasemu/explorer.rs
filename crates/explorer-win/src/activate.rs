@@ -38,3 +38,37 @@ pub fn minimize(hwnd: HWND) {
 pub fn close(hwnd: HWND) {
     syscommand(hwnd, SC_CLOSE);
 }
+
+/// Bring one of *our own* windows to the foreground even when another
+/// process currently owns it. Tries the plain call first; if Windows'
+/// foreground lock refuses, temporarily attaches our input queue to the
+/// foreground thread (documented `AttachThreadInput` technique).
+pub fn force_foreground(hwnd: HWND) {
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId,
+    };
+    // SAFETY: plain FFI calls; the attach is always undone.
+    unsafe {
+        if SetForegroundWindow(hwnd).as_bool() {
+            return;
+        }
+        let fg = GetForegroundWindow();
+        let fg_thread = GetWindowThreadProcessId(fg, None);
+        let me = GetCurrentThreadId();
+        if fg_thread != 0 && fg_thread != me {
+            use windows::Win32::System::Threading::AttachThreadInput;
+            let attached = AttachThreadInput(me, fg_thread, true).as_bool();
+            let _ = BringWindowToTop(hwnd);
+            let ok = SetForegroundWindow(hwnd).as_bool();
+            let _ = SetFocus(Some(hwnd));
+            if attached {
+                let _ = AttachThreadInput(me, fg_thread, false);
+            }
+            if !ok {
+                tracing::warn!("could not take the foreground (foreground lock)");
+            }
+        }
+    }
+}
