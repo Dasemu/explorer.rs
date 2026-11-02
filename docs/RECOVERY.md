@@ -18,6 +18,9 @@ Shell registration is per user (HKCU) and never automatic. Only
 `scripts/install-shell.ps1` does it, and it saves a backup of your previous
 value.
 
+An empty `HKCU\Software\explorer-rs` key (no values) can be left behind by an
+interrupted install. It is harmless: the scripts treat it as "no backup".
+
 ## Built-in safety net
 
 In `--shell` mode the supervisor restarts crashed components with exponential

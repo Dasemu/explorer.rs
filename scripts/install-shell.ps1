@@ -14,7 +14,8 @@
     - Never run automatically. Test in a VM with a snapshot first (see docs/RECOVERY.md).
 
 .PARAMETER ExePath
-    Path to explorer-rs.exe. Defaults to ..\explorer-rs.exe or .\explorer-rs.exe relative to this script.
+    Path to explorer-rs.exe. Defaults to ..\explorer-rs.exe or .\explorer-rs.exe relative to this script, then
+    %LOCALAPPDATA%\Programs\explorer-rs\explorer-rs.exe.
 
 .PARAMETER Force
     Skip the interactive "type YES" confirmation.
@@ -40,13 +41,27 @@ foreach ($k in @($WinlogonKey, $BackupKey)) {
     if (-not $k.StartsWith('HKCU:\')) { throw "Refusing to touch non-HKCU key: $k" }
 }
 
+
+# --- Registry helpers -------------------------------------------------------
+# Never use Get-ItemProperty / PSObject.Properties.Name to test for values: under
+# Set-StrictMode that throws PropertyNotFoundStrict on keys that have no values.
+function Get-RegValueInfo([string]$Path, [string]$Name) {
+    $key = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
+    if ($null -eq $key) { return [pscustomobject]@{ Exists = $false; Value = $null } }
+    if (@($key.GetValueNames()) -contains $Name) {
+        return [pscustomobject]@{ Exists = $true; Value = $key.GetValue($Name, $null, 'DoNotExpandEnvironmentNames') }
+    }
+    [pscustomobject]@{ Exists = $false; Value = $null }
+}
+
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # Resolve the executable.
 if ([string]::IsNullOrWhiteSpace($ExePath)) {
     $candidates = @(
         (Join-Path $scriptDir '..\explorer-rs.exe'),
-        (Join-Path $scriptDir 'explorer-rs.exe')
+        (Join-Path $scriptDir 'explorer-rs.exe'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\explorer-rs\explorer-rs.exe')
     )
     $ExePath = $null
     foreach ($c in $candidates) {
@@ -64,6 +79,13 @@ if ((Split-Path -Leaf $ExePath) -ne 'explorer-rs.exe') {
     throw "Expected a file named explorer-rs.exe, got: $ExePath"
 }
 
+# The shell should point at a stable location, not Downloads or a temp folder.
+$programsRoot = Join-Path $env:LOCALAPPDATA 'Programs'
+if (-not $ExePath.StartsWith($programsRoot + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+    Write-Warning "explorer-rs.exe is not under $programsRoot."
+    Write-Warning 'The shell should point at a stable location. Consider running scripts\install.ps1 first and then install-shell.ps1 from the installed folder.'
+}
+
 # The restore script must exist before we change anything.
 $restoreScript = Join-Path $scriptDir 'restore-explorer.ps1'
 if (-not (Test-Path -LiteralPath $restoreScript -PathType Leaf)) {
@@ -74,15 +96,9 @@ $restoreScript = (Resolve-Path -LiteralPath $restoreScript).ProviderPath
 $newShell = '"{0}" --shell' -f $ExePath
 
 # Read the current per-user Shell value, if any.
-$existed = $false
-$current = ''
-if (Test-Path -LiteralPath $WinlogonKey) {
-    $item = Get-ItemProperty -LiteralPath $WinlogonKey
-    if ($item.PSObject.Properties.Name -contains 'Shell') {
-        $existed = $true
-        $current = [string]$item.Shell
-    }
-}
+$cur = Get-RegValueInfo $WinlogonKey 'Shell'
+$existed = [bool]$cur.Exists
+$current = if ($existed) { [string]$cur.Value } else { '' }
 
 if ($existed -and $current -eq $newShell) {
     Write-Host 'The Shell value is already set to explorer-rs. Nothing to change.'
@@ -126,8 +142,8 @@ if (-not $Force) {
 if (-not (Test-Path -LiteralPath $BackupKey)) {
     New-Item -Path $BackupKey -Force | Out-Null
 }
-$backup = Get-ItemProperty -LiteralPath $BackupKey
-$hasBackup = $backup.PSObject.Properties.Name -contains 'PreviousShellExisted'
+# An empty key (e.g. left by an earlier failed run) counts as "no backup".
+$hasBackup = (Get-RegValueInfo $BackupKey 'PreviousShellExisted').Exists
 if (-not $hasBackup) {
     Set-ItemProperty -LiteralPath $BackupKey -Name 'PreviousShell' -Value $current -Type String
     Set-ItemProperty -LiteralPath $BackupKey -Name 'PreviousShellExisted' -Value ([int]$existed) -Type DWord

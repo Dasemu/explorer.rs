@@ -37,22 +37,33 @@ foreach ($k in @($WinlogonKey, $BackupKey)) {
     if (-not $k.StartsWith('HKCU:\')) { throw "Refusing to touch non-HKCU key: $k" }
 }
 
+# --- Registry helpers -------------------------------------------------------
+# Never use Get-ItemProperty / PSObject.Properties.Name to test for values: under
+# Set-StrictMode that throws PropertyNotFoundStrict on keys that have no values.
+function Get-RegValueInfo([string]$Path, [string]$Name) {
+    $key = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
+    if ($null -eq $key) { return [pscustomobject]@{ Exists = $false; Value = $null } }
+    if (@($key.GetValueNames()) -contains $Name) {
+        return [pscustomobject]@{ Exists = $true; Value = $key.GetValue($Name, $null, 'DoNotExpandEnvironmentNames') }
+    }
+    [pscustomobject]@{ Exists = $false; Value = $null }
+}
+
 # Read the backup, if present.
 $restoreValue = $null   # $null means: delete the value
-if (Test-Path -LiteralPath $BackupKey) {
-    $b = Get-ItemProperty -LiteralPath $BackupKey
-    $names = $b.PSObject.Properties.Name
-    if (($names -contains 'PreviousShellExisted') -and ([int]$b.PreviousShellExisted -eq 1) -and
-        ($names -contains 'PreviousShell') -and (-not [string]::IsNullOrWhiteSpace([string]$b.PreviousShell))) {
-        $restoreValue = [string]$b.PreviousShell
+$haveBackup = Test-Path -LiteralPath $BackupKey
+# An existing key with no PreviousShellExisted value (e.g. left by a failed run) is
+# harmless: it is treated as "no backup" and the Shell value is simply deleted.
+$existedInfo = Get-RegValueInfo $BackupKey 'PreviousShellExisted'
+if ($existedInfo.Exists -and ([int]$existedInfo.Value -eq 1)) {
+    $prev = Get-RegValueInfo $BackupKey 'PreviousShell'
+    if ($prev.Exists -and -not [string]::IsNullOrWhiteSpace([string]$prev.Value)) {
+        $restoreValue = [string]$prev.Value
     }
-    $haveBackup = $true
-} else {
-    $haveBackup = $false
 }
 
 Write-Host 'explorer.rs shell restore'
-Write-Host "  Backup found : $haveBackup"
+Write-Host "  Backup found : $($existedInfo.Exists)"
 if ($null -ne $restoreValue) {
     Write-Host "  Action       : set HKCU Winlogon Shell back to: $restoreValue"
 } else {
@@ -76,8 +87,7 @@ if ($null -ne $restoreValue) {
     Write-Host 'Restored the previous Shell value.'
 } else {
     if (Test-Path -LiteralPath $WinlogonKey) {
-        $item = Get-ItemProperty -LiteralPath $WinlogonKey
-        if ($item.PSObject.Properties.Name -contains 'Shell') {
+        if ((Get-RegValueInfo $WinlogonKey 'Shell').Exists) {
             Remove-ItemProperty -LiteralPath $WinlogonKey -Name 'Shell'
             Write-Host 'Deleted the HKCU Shell value.'
         } else {
