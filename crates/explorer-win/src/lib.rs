@@ -15,6 +15,10 @@ pub mod appbar;
 #[cfg(windows)]
 pub mod apps;
 #[cfg(windows)]
+pub mod desktop;
+#[cfg(windows)]
+pub mod dialog;
+#[cfg(windows)]
 pub mod dpi;
 #[cfg(windows)]
 pub mod gfx;
@@ -31,13 +35,21 @@ pub mod monitors;
 #[cfg(windows)]
 pub mod pipe;
 #[cfg(windows)]
+pub mod process;
+#[cfg(windows)]
+pub mod registry;
+#[cfg(windows)]
 pub mod security;
+#[cfg(windows)]
+pub mod session;
 #[cfg(windows)]
 pub mod shellhook;
 #[cfg(windows)]
 pub mod shellreg;
 #[cfg(windows)]
 pub mod single_instance;
+#[cfg(windows)]
+pub mod startup;
 #[cfg(windows)]
 pub mod theme;
 #[cfg(windows)]
@@ -46,6 +58,8 @@ pub mod time;
 pub mod tooltip;
 #[cfg(windows)]
 pub mod util;
+#[cfg(windows)]
+pub mod wallpaper;
 #[cfg(windows)]
 pub mod window;
 #[cfg(windows)]
