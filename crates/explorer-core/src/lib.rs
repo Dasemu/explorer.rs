@@ -5,6 +5,7 @@
 //! contains no Win32 calls: the `explorer-win` crate gathers raw data from the
 //! OS and hands it to the pure functions defined here.
 
+pub mod calc;
 pub mod catalog;
 pub mod clock;
 pub mod config;
@@ -16,7 +17,11 @@ pub mod ipc;
 pub mod layout;
 pub mod logging;
 pub mod paths;
+pub mod recent;
+pub mod results;
+pub mod run_command;
 pub mod search;
+pub mod settings_pages;
 pub mod shellreg;
 pub mod start;
 pub mod supervisor;

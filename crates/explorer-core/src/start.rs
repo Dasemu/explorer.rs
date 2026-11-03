@@ -131,6 +131,24 @@ impl Pins {
     }
 }
 
+/// Number of pages of the pinned grid (at least one, even when empty).
+pub fn page_count(total: usize, per_page: usize) -> usize {
+    if per_page == 0 {
+        return 1;
+    }
+    total.div_ceil(per_page).max(1)
+}
+
+/// Indexes of the pins shown on `page` (clamped to the last page).
+pub fn page_range(total: usize, per_page: usize, page: usize) -> std::ops::Range<usize> {
+    if per_page == 0 {
+        return 0..0;
+    }
+    let page = page.min(page_count(total, per_page) - 1);
+    let start = page * per_page;
+    start.min(total)..(start + per_page).min(total)
+}
+
 /// Group an alphabetical app list under first-letter headers, as Windows'
 /// "All apps" view does. Non-letters go under '#'.
 pub fn letter_of(name: &str) -> char {
@@ -213,6 +231,18 @@ mod tests {
         let mut p = Pins::default();
         p.keys.push("appsfolder:gone".into());
         assert!(p.resolve(&catalog()).is_empty());
+    }
+
+    #[test]
+    fn paging() {
+        assert_eq!(page_count(0, 18), 1);
+        assert_eq!(page_count(18, 18), 1);
+        assert_eq!(page_count(19, 18), 2);
+        assert_eq!(page_range(19, 18, 0), 0..18);
+        assert_eq!(page_range(19, 18, 1), 18..19);
+        assert_eq!(page_range(19, 18, 7), 18..19);
+        assert_eq!(page_range(0, 18, 0), 0..0);
+        assert_eq!(page_range(5, 0, 0), 0..0);
     }
 
     #[test]
