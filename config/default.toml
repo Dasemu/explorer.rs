@@ -45,6 +45,9 @@ date_format = "%d/%m/%Y"
 exclude_classes = []
 # Executable file names that must never appear on the taskbar (case-insensitive).
 exclude_processes = []
+# Windows 11 "Combine taskbar buttons": "always" (one button per app; several
+# windows open a thumbnail picker) or "never" (one button per window).
+combine = "always"
 
 [tray]
 # Show the notification area (system tray) on the primary monitor's taskbar.
@@ -53,6 +56,10 @@ enabled = true
 # tray icons too. Every message is forwarded to explorer.exe, which keeps
 # working normally. Set to false if tray icons misbehave.
 intercept_in_dev_mode = true
+# Show every tray icon on the taskbar. When false, only icons promoted in
+# Settings > Personalization > Taskbar > Other system tray icons are shown;
+# the rest are behind the "^" button, like Windows 11.
+show_all = false
 
 [launcher]
 # Open the launcher when the Windows key is pressed and released alone.
