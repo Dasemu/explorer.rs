@@ -118,7 +118,12 @@ $trusted = @(
 # GENERIC_WRITE / GENERIC_ALL in unmapped ACEs.
 $writeRights = [int64]([System.Security.AccessControl.FileSystemRights]'WriteData, AppendData, WriteExtendedAttributes, WriteAttributes, DeleteSubdirectoriesAndFiles, Delete, ChangePermissions, TakeOwnership') -bor 0x50000000
 $problems = @()
-foreach ($item in @($ExePath, $Dir)) {
+# The daemon binary matters as much as the helper: the helper trusts its
+# client by image path, so a writable explorer-rs-indexd.exe would let any
+# non-elevated code obtain raw MFT data.
+$checkItems = @($ExePath, $Dir)
+if (Test-Path -LiteralPath $Daemon) { $checkItems += $Daemon }
+foreach ($item in $checkItems) {
     $acl = Get-Acl -LiteralPath $item
     foreach ($rule in $acl.Access) {
         if ($rule.AccessControlType -ne 'Allow') { continue }

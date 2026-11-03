@@ -98,3 +98,15 @@ per-user ACL of `%LOCALAPPDATA%`.
   the helper pipe. See docs/TESTING-INDEX-ON-WINDOWS.md.
 - Hard links: one entry per MFT record (first name seen); other names of the
   same file are not indexed.
+
+## Review note (2026-11-03)
+- The helper authenticates its client by executable path. The install script
+  therefore checks that `explorer-rs-indexd.exe` (not only the helper and its
+  folder) cannot be modified by non-administrators.
+- The path check does not protect against code already running as the same
+  user injecting into the legitimate daemon process (same user, same
+  integrity level). The helper raises the bar against casual misuse; it is
+  not a hard boundary against same-user malware. Anyone with such malware can
+  already read every file that user can read; what they gain is file *names*
+  in folders the user cannot list. Document this trade-off before enabling
+  the helper on shared machines.
