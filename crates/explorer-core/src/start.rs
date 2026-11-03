@@ -18,6 +18,17 @@ pub struct Pins {
     pub keys: Vec<String>,
 }
 
+/// Default taskbar pins (Windows 11 defaults), same matching rules as
+/// [`DEFAULT_PIN_IDS`]. Used with `Pins::seed_with` for
+/// `AppPaths::taskbar_pins_file`, written by both the taskbar and the Start
+/// menu ("Pin to taskbar"). Readers should re-load the file when its
+/// modification time changes.
+pub const DEFAULT_TASKBAR_PIN_IDS: &[&str] = &[
+    "Microsoft.Windows.Explorer",
+    "MSEdge",
+    "Microsoft.WindowsStore_",
+];
+
 /// Packaged-app AUMID prefixes (and exact ids) pinned by default, in order,
 /// when present on the machine.
 pub const DEFAULT_PIN_IDS: &[&str] = &[
@@ -79,12 +90,17 @@ impl Pins {
         }
     }
 
-    /// Seed defaults once, from the apps that exist in `catalog`.
+    /// Seed the Start menu defaults once, from the apps in `catalog`.
     pub fn seed_defaults(&mut self, catalog: &Catalog) -> bool {
+        self.seed_with(DEFAULT_PIN_IDS, catalog)
+    }
+
+    /// Seed `ids` once (see [`DEFAULT_PIN_IDS`] for the matching rules).
+    pub fn seed_with(&mut self, ids: &[&str], catalog: &Catalog) -> bool {
         if self.initialized || catalog.is_empty() {
             return false;
         }
-        for id in DEFAULT_PIN_IDS {
+        for id in ids {
             let found = catalog.entries().iter().find(|e| match &e.target {
                 LaunchTarget::AppsFolder(a) => {
                     if id.ends_with('_') {

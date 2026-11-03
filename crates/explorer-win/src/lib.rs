@@ -35,6 +35,8 @@ pub mod security;
 #[cfg(windows)]
 pub mod shellhook;
 #[cfg(windows)]
+pub mod shellreg;
+#[cfg(windows)]
 pub mod single_instance;
 #[cfg(windows)]
 pub mod theme;

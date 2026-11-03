@@ -17,6 +17,7 @@ pub mod layout;
 pub mod logging;
 pub mod paths;
 pub mod search;
+pub mod shellreg;
 pub mod start;
 pub mod supervisor;
 pub mod taskbar_model;

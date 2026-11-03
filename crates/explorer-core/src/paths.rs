@@ -61,6 +61,11 @@ impl AppPaths {
         self.config_dir.join("config.toml")
     }
 
+    /// Apps pinned to the taskbar (same format as [`Self::pins_file`]).
+    pub fn taskbar_pins_file(&self) -> PathBuf {
+        self.state_dir.join("taskbar-pins.toml")
+    }
+
     pub fn pins_file(&self) -> PathBuf {
         self.state_dir.join("pins.toml")
     }
