@@ -15,6 +15,9 @@ log_keep_files = 7
 # Colours: "system" (follow Windows light/dark mode and accent colour),
 # "dark" or "light".
 theme = "system"
+# User-interface language: "system" (Spanish if Windows is in Spanish,
+# English otherwise), "en" or "es".
+language = "system"
 
 [taskbar]
 # Screen edge: "bottom" or "top".

@@ -43,6 +43,7 @@ pub struct GeneralConfig {
     pub log_level: String,
     pub log_keep_files: usize,
     pub theme: ThemeMode,
+    pub language: crate::i18n::LanguageSetting,
 }
 
 impl Default for GeneralConfig {
@@ -51,6 +52,7 @@ impl Default for GeneralConfig {
             log_level: "info".into(),
             log_keep_files: 7,
             theme: ThemeMode::System,
+            language: crate::i18n::LanguageSetting::System,
         }
     }
 }

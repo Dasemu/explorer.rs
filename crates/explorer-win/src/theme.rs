@@ -77,3 +77,14 @@ pub fn user_display_name() -> String {
     }
     std::env::var("USERNAME").unwrap_or_default()
 }
+
+/// Windows user-interface LANGID (for `explorer_core::i18n::Lang`).
+pub fn ui_langid() -> u16 {
+    // SAFETY: no arguments.
+    unsafe { windows::Win32::Globalization::GetUserDefaultUILanguage() }
+}
+
+/// Resolve the configured UI language.
+pub fn ui_lang(setting: explorer_core::i18n::LanguageSetting) -> explorer_core::i18n::Lang {
+    explorer_core::i18n::Lang::resolve(setting, ui_langid)
+}
