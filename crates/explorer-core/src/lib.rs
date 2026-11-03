@@ -7,8 +7,11 @@
 
 pub mod catalog;
 pub mod clock;
+pub mod components;
 pub mod config;
+pub mod crashlog;
 pub mod dump;
+pub mod guardian;
 pub mod hotkey;
 pub mod i18n;
 pub mod image;
@@ -19,10 +22,12 @@ pub mod paths;
 pub mod search;
 pub mod shellreg;
 pub mod start;
+pub mod startup;
 pub mod supervisor;
 pub mod taskbar_model;
 pub mod theme;
 pub mod tray;
+pub mod wallpaper;
 pub mod window_filter;
 
 /// Human-readable product name.

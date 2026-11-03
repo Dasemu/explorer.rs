@@ -100,7 +100,7 @@ mod tests {
             restart_max_delay_ms: 4000,
             crash_loop_max: 3,
             crash_loop_window_s: 60,
-            components: vec![],
+            ..SupervisorConfig::default()
         })
     }
 
