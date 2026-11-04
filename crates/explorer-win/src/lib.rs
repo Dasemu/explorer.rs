@@ -43,6 +43,8 @@ pub mod process;
 #[cfg(windows)]
 pub mod registry;
 #[cfg(windows)]
+pub mod sched;
+#[cfg(windows)]
 pub mod security;
 #[cfg(windows)]
 pub mod session;
@@ -50,6 +52,8 @@ pub mod session;
 pub mod shellhook;
 #[cfg(windows)]
 pub mod shellreg;
+#[cfg(windows)]
+pub mod shortcut;
 #[cfg(windows)]
 pub mod single_instance;
 #[cfg(windows)]

@@ -9,21 +9,31 @@ pub const INDEXD: &str = "indexd";
 
 /// Registry value written by the installer (`HKLM\Software\explorer-rs`,
 /// REG_DWORD 1 = file search chosen, 0 = not chosen).
-pub const FILE_SEARCH_SUBKEY: &str = r"Software\explorer-rs";
-pub const FILE_SEARCH_VALUE: &str = "FileSearch";
+pub const FILE_SEARCH_SUBKEY: &str = crate::setup::MACHINE_KEY;
+pub const FILE_SEARCH_VALUE: &str = crate::setup::VALUE_FILE_SEARCH;
 
-/// True if the TOML text sets `supervisor.components` explicitly. Broken
-/// TOML counts as "not explicit" (the config falls back to defaults anyway).
+/// True if the TOML text sets `supervisor.components` to something other
+/// than the default list. A list equal to the default does not count: config
+/// files created from the documented default (`--edit-config`,
+/// config.example.toml) contain it verbatim, and must still pick up the
+/// installer's file-search choice. Broken TOML counts as "not explicit" (the
+/// config falls back to defaults anyway).
 pub fn components_explicit(toml_text: &str) -> bool {
-    toml_text
+    let Some(list) = toml_text
         .parse::<toml::Table>()
         .ok()
-        .and_then(|t| {
-            t.get("supervisor")
-                .and_then(|s| s.as_table())
-                .map(|s| s.contains_key("components"))
-        })
-        .unwrap_or(false)
+        .and_then(|t| t.get("supervisor").cloned())
+        .and_then(|s| s.as_table().and_then(|s| s.get("components").cloned()))
+    else {
+        return false;
+    };
+    let default = SupervisorConfig::default().components;
+    let given: Option<Vec<String>> = list.as_array().map(|a| {
+        a.iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect()
+    });
+    given.as_ref() != Some(&default)
 }
 
 /// Final list of components to run.
@@ -89,6 +99,19 @@ pub fn list_diff(old: &[String], new: &[String]) -> (Vec<String>, Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_list_in_file_is_not_explicit() {
+        let d = SupervisorConfig::default().components;
+        let toml_default = format!("[supervisor]\ncomponents = {:?}\n", d);
+        assert!(!components_explicit(&toml_default));
+        assert!(!components_explicit(crate::config::DEFAULT_CONFIG_TOML));
+        assert!(components_explicit(
+            "[supervisor]\ncomponents = [\"taskbar\"]\n"
+        ));
+        assert!(!components_explicit("[general]\n"));
+        assert!(!components_explicit("not toml ["));
+    }
 
     fn sup(components: &[&str], fs: FileSearch) -> SupervisorConfig {
         SupervisorConfig {

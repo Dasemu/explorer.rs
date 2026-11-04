@@ -27,6 +27,7 @@ pub mod results;
 pub mod run_command;
 pub mod search;
 pub mod settings_pages;
+pub mod setup;
 pub mod shellpath;
 pub mod shellreg;
 pub mod start;
