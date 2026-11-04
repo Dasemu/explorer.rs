@@ -17,6 +17,13 @@ struct TestHost {
     fallbacks: Vec<FallbackReason>,
     commands: Vec<HostCommand>,
     healthy: bool,
+    /// The Windows Explorer shell "runs".
+    explorer: bool,
+    /// Graceful stop requests (pids); the host sends SIGTERM when
+    /// `stop_works`.
+    stop_requests: Vec<u32>,
+    stop_works: bool,
+    stopped: bool,
 }
 
 impl Host for TestHost {
@@ -36,6 +43,21 @@ impl Host for TestHost {
     fn healthy(&mut self) {
         self.healthy = true;
     }
+    fn explorer_shell_running(&self) -> bool {
+        self.explorer
+    }
+    fn request_stop(&mut self, pid: u32) -> bool {
+        self.stop_requests.push(pid);
+        if self.stop_works {
+            let _ = std::process::Command::new("kill")
+                .arg(pid.to_string())
+                .status();
+        }
+        true
+    }
+    fn stopped(&mut self) {
+        self.stopped = true;
+    }
 }
 
 impl TestHost {
@@ -48,6 +70,7 @@ fn options(script: &str, shell: bool) -> Options {
     Options {
         program: "sh".into(),
         args: vec!["-c".into(), script.into()],
+        dev_args: vec!["-c".into(), script.into()],
         envs: vec![("EXPLORER_RS_TEST".into(), "1".into())],
         shell,
         supervisor: SupervisorConfig {
@@ -59,6 +82,7 @@ fn options(script: &str, shell: bool) -> Options {
         },
         poll: Duration::from_millis(10),
         healthy_after: Duration::from_secs(3600),
+        stop_timeout: Duration::from_millis(300),
     }
 }
 
@@ -89,6 +113,9 @@ struct EndingHost {
 impl Host for EndingHost {
     fn poll_command(&mut self) -> Option<HostCommand> {
         None
+    }
+    fn explorer_shell_running(&self) -> bool {
+        self.inner.explorer
     }
     fn session_ending(&self) -> bool {
         self.polls.set(self.polls.get() + 1);
@@ -219,4 +246,84 @@ fn restart_command_kills_and_restarts() {
     assert!(started.elapsed() < Duration::from_secs(20));
     assert_eq!(d.inner.count(EventKind::Start), 2);
     assert_eq!(d.inner.count(EventKind::Crash), 0);
+}
+
+#[test]
+fn shell_guardian_starts_dev_mode_while_explorer_shell_runs() {
+    let mut host = EndingHost {
+        inner: TestHost {
+            explorer: true,
+            ..Default::default()
+        },
+        polls: Default::default(),
+        n: 60,
+    };
+    let mut o = options("exit 3", true);
+    // Dev mode exits cleanly; the shell arguments would boot-loop.
+    o.dev_args = vec!["-c".into(), "exit 0".into()];
+    assert_eq!(run(&o, &mut host), 0);
+    assert_eq!(host.inner.count(EventKind::Start), 1);
+    assert!(host.inner.fallbacks.is_empty());
+}
+
+/// Issues `cmd` on the 20th poll.
+struct CommandAt {
+    inner: TestHost,
+    polls: u32,
+    cmd: HostCommand,
+}
+
+impl Host for CommandAt {
+    fn poll_command(&mut self) -> Option<HostCommand> {
+        self.polls += 1;
+        (self.polls == 20).then_some(self.cmd)
+    }
+    fn session_ending(&self) -> bool {
+        false
+    }
+    fn fallback(&mut self, r: FallbackReason) -> AfterFallback {
+        self.inner.fallback(r)
+    }
+    fn record(&mut self, ev: Event) {
+        self.inner.record(ev)
+    }
+    fn healthy(&mut self) {}
+    fn request_stop(&mut self, pid: u32) -> bool {
+        self.inner.request_stop(pid)
+    }
+    fn stopped(&mut self) {
+        self.inner.stopped()
+    }
+}
+
+#[test]
+fn shutdown_command_stops_the_supervisor_gracefully() {
+    let mut h = CommandAt {
+        inner: TestHost {
+            stop_works: true,
+            ..Default::default()
+        },
+        polls: 0,
+        cmd: HostCommand::Shutdown,
+    };
+    let started = std::time::Instant::now();
+    // `exec` so the pid the guardian sees is the sleeping process.
+    assert_eq!(run(&options("exec sleep 30", true), &mut h), 0);
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(h.inner.stop_requests.len(), 1);
+    assert!(h.inner.stopped, "clean end recorded");
+    assert_eq!(h.inner.count(EventKind::Start), 1);
+}
+
+#[test]
+fn shutdown_command_kills_a_supervisor_that_does_not_stop() {
+    let mut h = CommandAt {
+        inner: TestHost::default(),
+        polls: 0,
+        cmd: HostCommand::Shutdown,
+    };
+    let started = std::time::Instant::now();
+    assert_eq!(run(&options("exec sleep 30", false), &mut h), 0);
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(h.inner.stopped);
 }

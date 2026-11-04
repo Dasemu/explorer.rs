@@ -11,7 +11,12 @@
 //!   is restarted;
 //! - in shell mode, a taskbar crash loop ends the supervisor with
 //!   `EXIT_FALLBACK` so the guardian can fall back to explorer.exe, and the
-//!   once-per-sign-in shell duties (ready events, startup apps) run.
+//!   once-per-sign-in shell duties (ready events, startup apps) run;
+//! - the guardian's process is watched: if it dies, the supervisor handles
+//!   fallbacks itself (starts explorer.exe) instead of exiting with
+//!   `EXIT_FALLBACK` to nobody;
+//! - `ExplorerRs.Shutdown` (from the guardian or setup) stops every
+//!   component gracefully, then the supervisor exits with 0.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -24,7 +29,7 @@ use explorer_core::config::Config;
 #[cfg(windows)]
 use explorer_core::guardian::EXIT_ALREADY_RUNNING;
 use explorer_core::guardian::{
-    component_needs_fallback, EXIT_FALLBACK, GUARDED_ENV, SESSION_START_ENV,
+    component_needs_fallback, EXIT_FALLBACK, GUARDED_ENV, GUARDIAN_PID_ENV, SESSION_START_ENV,
 };
 use explorer_core::ipc::{RunMode, MODE_ENV};
 use explorer_core::paths::AppPaths;
@@ -37,7 +42,8 @@ const CONFIG_POLL: Duration = Duration::from_secs(2);
 /// After `WM_QUERYENDSESSION`, component exits within this time are not
 /// treated as crashes and nothing is restarted (the session may end).
 const QUERY_GRACE: Duration = Duration::from_secs(30);
-/// How long a component gets to close after `WM_CLOSE` before it is killed.
+/// How long a component gets to exit after the graceful shutdown message
+/// before it is killed.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
 /// After the session ends, wait at most this long for components to exit.
 const END_WAIT: Duration = Duration::from_secs(10);
@@ -47,6 +53,8 @@ const END_WAIT: Duration = Duration::from_secs(10);
 pub struct SessionFlags {
     pub ending: AtomicBool,
     pub query_at: Mutex<Option<Instant>>,
+    /// `ExplorerRs.Shutdown` received: stop everything gracefully.
+    pub shutdown: AtomicBool,
 }
 
 impl SessionFlags {
@@ -197,7 +205,18 @@ pub fn main(mode: RunMode, config_override: Option<&Path>, only: Option<&str>) -
         }
     };
 
-    let guarded = std::env::var(GUARDED_ENV).is_ok_and(|v| v == "1");
+    let guardian_pid = explorer_core::guardian::guardian_pid(
+        std::env::var(GUARDED_ENV).ok().as_deref(),
+        std::env::var(GUARDIAN_PID_ENV).ok().as_deref(),
+    );
+    let guarded = Arc::new(AtomicBool::new(guardian_pid.is_some()));
+    if std::env::var(GUARDED_ENV).is_ok_and(|v| v == "1") && guardian_pid.is_none() {
+        tracing::warn!("guarded without a valid guardian pid; handling fallbacks myself");
+    }
+    #[cfg(windows)]
+    if let Some(pid) = guardian_pid {
+        watch_guardian(pid, guarded.clone());
+    }
     let now_ms = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -227,6 +246,10 @@ pub fn main(mode: RunMode, config_override: Option<&Path>, only: Option<&str>) -
                 SysEvent::SessionEnding => {
                     tracing::info!("session ending");
                     f.ending.store(true, Ordering::SeqCst);
+                }
+                SysEvent::Shutdown => {
+                    tracing::info!("graceful shutdown requested");
+                    f.shutdown.store(true, Ordering::SeqCst);
                 }
                 _ => {}
             }
@@ -280,7 +303,8 @@ pub fn main(mode: RunMode, config_override: Option<&Path>, only: Option<&str>) -
 
 struct Supervisor {
     mode: RunMode,
-    guarded: bool,
+    /// A guardian handles fallbacks; cleared when the guardian dies.
+    guarded: Arc<AtomicBool>,
     config: Config,
     config_override: Option<PathBuf>,
     only: Option<String>,
@@ -309,6 +333,11 @@ impl Supervisor {
                 }
                 std::thread::sleep(Duration::from_millis(200));
                 continue;
+            }
+            if self.flags.shutdown.load(Ordering::SeqCst) {
+                tracing::info!("stopping all components (graceful shutdown)");
+                self.shutdown();
+                return 0;
             }
             if watch.poll(now) {
                 self.reload(&watch.path);
@@ -383,7 +412,7 @@ impl Supervisor {
                 fallback = true;
             }
             if fallback {
-                if self.guarded {
+                if self.guarded.load(Ordering::SeqCst) {
                     self.shutdown();
                     return EXIT_FALLBACK;
                 }
@@ -491,39 +520,81 @@ impl Supervisor {
         self.config = new;
     }
 
+    /// Stop every component: graceful shutdown message to all of them at
+    /// once, then kill whatever is left after [`CLOSE_TIMEOUT`].
     fn shutdown(&mut self) {
-        for c in self.comps.iter_mut() {
-            if let Some(mut child) = c.child.take() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-            c.done = true;
-        }
+        let mut children: Vec<Child> = self
+            .comps
+            .iter_mut()
+            .filter_map(|c| {
+                c.done = true;
+                c.child.take()
+            })
+            .collect();
+        stop_children(&mut children);
     }
 }
 
-/// Ask a component to close (WM_CLOSE to its windows), then kill it.
-fn stop_child(c: &mut Component) {
-    let Some(mut child) = c.child.take() else {
-        return;
-    };
+/// Ask `children` to exit (`ExplorerRs.Shutdown`), wait up to
+/// [`CLOSE_TIMEOUT`] in total, then kill the rest.
+fn stop_children(children: &mut [Child]) {
     #[cfg(windows)]
     {
-        let n = explorer_win::process::post_close(child.id());
-        if n > 0 {
+        let pids: Vec<u32> = children.iter().map(Child::id).collect();
+        if explorer_win::process::post_shutdown_all(&pids) > 0 {
             let deadline = Instant::now() + CLOSE_TIMEOUT;
-            while Instant::now() < deadline {
-                if !matches!(child.try_wait(), Ok(None)) {
-                    return;
-                }
+            while Instant::now() < deadline
+                && children
+                    .iter_mut()
+                    .any(|c| matches!(c.try_wait(), Ok(None)))
+            {
                 std::thread::sleep(Duration::from_millis(50));
             }
         }
     }
     #[cfg(not(windows))]
     let _ = CLOSE_TIMEOUT;
-    let _ = child.kill();
-    let _ = child.wait();
+    for c in children.iter_mut() {
+        if matches!(c.try_wait(), Ok(None)) {
+            let _ = c.kill();
+        }
+        let _ = c.wait();
+    }
+}
+
+/// Watch the guardian process; once it is gone, nobody would act on
+/// `EXIT_FALLBACK`, so the supervisor handles fallbacks itself.
+#[cfg(windows)]
+fn watch_guardian(pid: u32, guarded: Arc<AtomicBool>) {
+    // Make sure the pid still names a guardian (same executable as us).
+    let ours = std::env::current_exe().ok();
+    let same = explorer_win::security::process_image_path(pid)
+        .ok()
+        .zip(ours)
+        .is_some_and(|(a, b)| {
+            a.to_string_lossy()
+                .eq_ignore_ascii_case(&b.to_string_lossy())
+        });
+    let g = guarded.clone();
+    let watching = same
+        && explorer_win::process::on_process_exit(pid, move || {
+            tracing::warn!(
+                pid,
+                "the guardian exited; this supervisor now handles fallbacks itself"
+            );
+            g.store(false, Ordering::SeqCst);
+        });
+    if !watching {
+        tracing::warn!(pid, "guardian not found; handling fallbacks myself");
+        guarded.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Ask a component to exit (`ExplorerRs.Shutdown`), then kill it.
+fn stop_child(c: &mut Component) {
+    if let Some(child) = c.child.take() {
+        stop_children(&mut [child]);
+    }
 }
 
 fn spawn(exe: &Path, mode: RunMode, config_override: Option<&Path>) -> std::io::Result<Child> {

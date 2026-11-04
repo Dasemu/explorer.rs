@@ -46,6 +46,12 @@ pub struct Args {
     /// Shell mode: explorer.rs is the user's shell (no explorer.exe).
     #[arg(long)]
     pub shell: bool,
+    /// With --dev/--shell: explorer.rs is being restarted (e.g. by setup
+    /// after an update), not started for a new sign-in. Skips the sign-in
+    /// accounting of the crash log and the once-per-sign-in shell duties
+    /// (startup apps, ready events).
+    #[arg(long, conflicts_with = "supervise")]
+    pub resume: bool,
     /// Internal: run the supervisor itself (started by the guardian).
     #[arg(long, hide = true)]
     pub supervise: bool,
@@ -57,19 +63,19 @@ pub struct Args {
     pub only: Option<String>,
     /// Restore Windows Explorer as this user's shell, stop explorer.rs and
     /// start explorer.exe if it is not running.
-    #[arg(long, conflicts_with_all = ["dev", "shell", "supervise", "edit_config", "status"])]
+    #[arg(long, conflicts_with_all = ["dev", "shell", "supervise", "edit_config", "status", "resume"])]
     pub restore_explorer: bool,
     /// Create the config file from the default if missing and open it in
     /// Notepad.
-    #[arg(long, conflicts_with_all = ["dev", "shell", "supervise", "status"])]
+    #[arg(long, conflicts_with_all = ["dev", "shell", "supervise", "status", "resume"])]
     pub edit_config: bool,
     /// Ask the running explorer.rs to restart all its components (same as
     /// Ctrl+Alt+Shift+R).
-    #[arg(long, conflicts_with_all = ["dev", "shell", "supervise", "restore_explorer", "edit_config", "status"])]
+    #[arg(long, conflicts_with_all = ["dev", "shell", "supervise", "restore_explorer", "edit_config", "status", "resume"])]
     pub restart: bool,
     /// Print a diagnostics report (version, mode, components, shell
     /// registration, config validity, recent crash-log events).
-    #[arg(long, conflicts_with_all = ["dev", "shell", "supervise"])]
+    #[arg(long, conflicts_with_all = ["dev", "shell", "supervise", "resume"])]
     pub status: bool,
     /// With --status: write the report to this file instead of stdout.
     #[arg(long, value_name = "PATH", requires = "status")]
@@ -94,6 +100,10 @@ fn main() {
     }
     if args.status {
         std::process::exit(cli::status(args.config.as_deref(), args.output.as_deref()));
+    }
+    if args.resume && !(args.dev || args.shell) {
+        eprintln!("--resume requires --dev or --shell");
+        std::process::exit(2);
     }
     let mode = match (args.dev, args.shell) {
         (true, _) => RunMode::Dev,
@@ -135,6 +145,13 @@ mod tests {
         assert!(Args::try_parse_from(["explorer-rs", "--edit-config", "--status"]).is_err());
         assert!(Args::try_parse_from(["explorer-rs", "--restart"]).is_ok());
         assert!(Args::try_parse_from(["explorer-rs", "--restart", "--dev"]).is_err());
+        let a = Args::try_parse_from(["explorer-rs", "--shell", "--resume"]).unwrap();
+        assert!(a.shell && a.resume);
+        assert!(Args::try_parse_from(["explorer-rs", "--dev", "--resume"]).is_ok());
+        assert!(
+            Args::try_parse_from(["explorer-rs", "--supervise", "--shell", "--resume"]).is_err()
+        );
+        assert!(Args::try_parse_from(["explorer-rs", "--resume", "--status"]).is_err());
         let a = Args::try_parse_from([
             "explorer-rs",
             "--supervise",

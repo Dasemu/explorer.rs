@@ -18,12 +18,16 @@ use std::time::{Duration, Instant};
 use explorer_core::config::SupervisorConfig;
 use explorer_core::crashlog::{Event, EventKind};
 use explorer_core::guardian::{FallbackReason, GuardianDecision, GuardianPolicy};
+use explorer_core::ipc::RunMode;
 
 /// Requests from the user (emergency hotkeys).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostCommand {
     /// Kill the supervisor (and with it every component) and start again.
     RestartAll,
+    /// `ExplorerRs.Shutdown`: stop the supervisor gracefully, record a
+    /// clean end and exit (setup, `--restore-explorer`).
+    Shutdown,
 }
 
 /// What the guardian does after a fallback.
@@ -48,18 +52,52 @@ pub trait Host {
     fn record(&mut self, ev: Event);
     /// The supervisor has been running for [`Options::healthy_after`].
     fn healthy(&mut self);
+    /// Is the Windows Explorer shell running? A shell-mode guardian then
+    /// starts the supervisor in dev mode (never two shells).
+    fn explorer_shell_running(&self) -> bool {
+        false
+    }
+    /// Ask process `pid` (the supervisor) to stop gracefully. Returns false
+    /// if it could not be asked (it is then killed).
+    fn request_stop(&mut self, _pid: u32) -> bool {
+        false
+    }
+    /// The guardian is stopping on request: record a clean end.
+    fn stopped(&mut self) {}
 }
 
 /// How to run the supervisor child.
 #[derive(Debug, Clone)]
 pub struct Options {
     pub program: PathBuf,
+    /// Supervisor arguments for the guardian's own mode.
     pub args: Vec<OsString>,
+    /// Supervisor arguments for dev mode, used by a shell-mode guardian
+    /// while the Windows Explorer shell runs.
+    pub dev_args: Vec<OsString>,
     pub envs: Vec<(String, String)>,
     pub shell: bool,
     pub supervisor: SupervisorConfig,
     pub poll: Duration,
     pub healthy_after: Duration,
+    /// How long the supervisor gets to stop after a graceful request.
+    pub stop_timeout: Duration,
+}
+
+/// Ask the supervisor to stop gracefully, wait up to `timeout`, then kill.
+fn stop_supervisor(c: &mut Child, host: &mut dyn Host, timeout: Duration, poll: Duration) {
+    if host.request_stop(c.id()) {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if !matches!(c.try_wait(), Ok(None)) {
+                return;
+            }
+            std::thread::sleep(poll.min(Duration::from_millis(100)));
+        }
+        tracing::warn!("supervisor did not stop in time; killing it");
+    }
+    let _ = c.kill();
+    let _ = c.wait();
 }
 
 fn now_s() -> u64 {
@@ -100,6 +138,14 @@ pub fn run(opts: &Options, host: &mut dyn Host) -> i32 {
                     idle = false;
                     next_start = Some(now);
                 }
+                HostCommand::Shutdown => {
+                    tracing::info!("graceful shutdown requested");
+                    if let Some((mut c, _)) = child.take() {
+                        stop_supervisor(&mut c, host, opts.stop_timeout, opts.poll);
+                    }
+                    host.stopped();
+                    return 0;
+                }
             }
         }
 
@@ -127,8 +173,20 @@ pub fn run(opts: &Options, host: &mut dyn Host) -> i32 {
 
         if child.is_none() && !idle && next_start.is_some_and(|t| now >= t) {
             next_start = None;
+            let mode = explorer_core::guardian::supervisor_mode(
+                opts.shell,
+                opts.shell && host.explorer_shell_running(),
+            );
+            let args = if opts.shell && mode == RunMode::Dev {
+                tracing::warn!(
+                    "the Windows Explorer shell is running; starting explorer.rs in dev mode"
+                );
+                &opts.dev_args
+            } else {
+                &opts.args
+            };
             let mut cmd = Command::new(&opts.program);
-            cmd.args(&opts.args).stdin(Stdio::null());
+            cmd.args(args).stdin(Stdio::null());
             for (k, v) in &opts.envs {
                 cmd.env(k, v);
             }
@@ -148,14 +206,29 @@ pub fn run(opts: &Options, host: &mut dyn Host) -> i32 {
         if let Some((code, uptime_ms)) = exited {
             let since = now.duration_since(session_start).as_millis() as u64;
             let decision = policy.on_exit(code, uptime_ms, since, host.session_ending());
-            tracing::info!(?code, uptime_ms, ?decision, "supervisor exited");
+            if code == Some(explorer_core::guardian::EXIT_ALREADY_RUNNING) {
+                // Log the first retry only; the delay backs off to 60 s.
+                if policy.already_running_streak() == 1 {
+                    tracing::warn!(
+                        ?decision,
+                        "another supervisor is already running in this session; retrying with backoff"
+                    );
+                }
+            } else {
+                tracing::info!(?code, uptime_ms, ?decision, "supervisor exited");
+            }
             let kind = match decision {
                 GuardianDecision::Restart { crash: true, .. } | GuardianDecision::Fallback(_) => {
                     EventKind::Crash
                 }
                 _ => EventKind::Exit,
             };
-            host.record(Event::new(now_s(), kind, "supervisor").with_code(code));
+            let repeated_already_running = code
+                == Some(explorer_core::guardian::EXIT_ALREADY_RUNNING)
+                && policy.already_running_streak() > 1;
+            if !repeated_already_running {
+                host.record(Event::new(now_s(), kind, "supervisor").with_code(code));
+            }
             match decision {
                 GuardianDecision::Restart { delay_ms, .. } => {
                     next_start = Some(now + Duration::from_millis(delay_ms));

@@ -7,10 +7,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use explorer_core::config::Config;
-use explorer_core::crashlog::{crashlog_file, unix_now, CrashState, Event, EventKind};
+use explorer_core::crashlog::{
+    crashlog_file, unix_now, CrashLogFile, CrashState, Event, EventKind,
+};
 #[cfg(not(windows))]
 use explorer_core::guardian::FallbackReason;
-use explorer_core::guardian::{GUARDED_ENV, SESSION_START_ENV};
+use explorer_core::guardian::{GUARDED_ENV, GUARDIAN_PID_ENV, SESSION_START_ENV};
 use explorer_core::ipc::RunMode;
 use explorer_core::paths::AppPaths;
 use explorer_supervisor::guardian::{self, Options};
@@ -73,28 +75,43 @@ pub fn guardian_main(mode: RunMode, args: &Args) -> i32 {
     };
 
     let log_path = crashlog_file(&paths);
-    let (mut state, err) = CrashState::load(&log_path);
+    let (mut log, err) = CrashLogFile::open(log_path.clone());
     if let Some(e) = err {
         tracing::warn!(error = %e, "crash log unreadable; starting a new one");
     }
     let shell = mode == RunMode::Shell;
-    if shell {
-        let decision = state.begin_shell_session(unix_now());
-        tracing::info!(?decision, "shell sign-in");
-        if let Err(e) = state.save(&log_path) {
+    let resume = args.resume;
+    if resume {
+        // Relaunched by setup after an upgrade: not a new sign-in. No
+        // sign-in accounting, no startup apps, no ready events.
+        tracing::info!("resuming after an update; not a new sign-in");
+        let detail = format!("{}, resumed", mode.as_str());
+        if let Err(e) = log.update(|st| {
+            st.record(
+                Event::new(unix_now(), EventKind::SessionStart, "guardian").with_detail(detail),
+            )
+        }) {
             tracing::warn!(error = %e, "cannot write crash log");
         }
+    } else if shell {
+        let mut decision = explorer_core::crashlog::SigninDecision::AutoRestore;
+        if let Err(e) = log.update(|st| decision = st.begin_shell_session(unix_now())) {
+            tracing::warn!(error = %e, "cannot write crash log");
+        }
+        tracing::info!(?decision, "shell sign-in");
         if decision == explorer_core::crashlog::SigninDecision::AutoRestore {
             #[cfg(windows)]
             {
-                win_auto_restore(&config, &mut state, &log_path);
+                win_auto_restore(&config, &mut log);
                 return 0;
             }
         }
     } else {
-        state
-            .record(Event::new(unix_now(), EventKind::SessionStart, "guardian").with_detail("dev"));
-        let _ = state.save(&log_path);
+        let _ = log.update(|st| {
+            st.record(
+                Event::new(unix_now(), EventKind::SessionStart, "guardian").with_detail("dev"),
+            )
+        });
     }
 
     let program = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("explorer-rs"));
@@ -105,27 +122,28 @@ pub fn guardian_main(mode: RunMode, args: &Args) -> i32 {
     let opts = Options {
         program,
         args: supervisor_args(mode, args),
+        dev_args: supervisor_args(RunMode::Dev, args),
         envs: vec![
             (GUARDED_ENV.into(), "1".into()),
+            (GUARDIAN_PID_ENV.into(), std::process::id().to_string()),
             (SESSION_START_ENV.into(), session_start_ms.to_string()),
         ],
         shell,
         supervisor: config.supervisor.clone(),
         poll: Duration::from_millis(200),
         healthy_after: Duration::from_secs(explorer_core::crashlog::HEALTHY_SESSION_S),
+        // The supervisor itself gives its components 3 s.
+        stop_timeout: Duration::from_secs(8),
     };
 
     #[cfg(windows)]
     let code = {
-        let mut host = crate::win_host::WinHost::new(state, log_path, shell, &config);
+        let mut host = crate::win_host::WinHost::new(log, shell, resume, &config);
         guardian::run(&opts, &mut host)
     };
     #[cfg(not(windows))]
     let code = {
-        let mut host = FileHost {
-            state,
-            path: log_path,
-        };
+        let mut host = FileHost { log };
         guardian::run(&opts, &mut host)
     };
     tracing::info!(code, "guardian exiting");
@@ -133,16 +151,24 @@ pub fn guardian_main(mode: RunMode, args: &Args) -> i32 {
 }
 
 #[cfg(windows)]
-fn win_auto_restore(config: &Config, state: &mut CrashState, log_path: &Path) {
+fn win_auto_restore(config: &Config, log: &mut CrashLogFile) {
     let lang = explorer_win::theme::ui_lang(config.general.language);
-    crate::win_host::auto_restore(lang, state, log_path);
+    crate::win_host::auto_restore(lang, log);
 }
 
 /// Non-Windows host: crash log only (development and tests).
 #[cfg(not(windows))]
 struct FileHost {
-    state: CrashState,
-    path: PathBuf,
+    log: CrashLogFile,
+}
+
+#[cfg(not(windows))]
+impl FileHost {
+    fn update(&mut self, f: impl FnOnce(&mut CrashState)) {
+        if let Err(e) = self.log.update(f) {
+            tracing::warn!(error = %e, "cannot write crash log");
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -154,18 +180,22 @@ impl Host for FileHost {
         false
     }
     fn fallback(&mut self, reason: FallbackReason) -> AfterFallback {
-        self.state.on_fallback(unix_now(), reason.as_str());
-        let _ = self.state.save(&self.path);
+        self.update(|st| {
+            st.on_fallback(unix_now(), reason.as_str());
+        });
         tracing::error!("fallback to explorer.exe is only available on Windows");
         AfterFallback::Exit
     }
     fn record(&mut self, ev: Event) {
-        self.state.record(ev);
-        let _ = self.state.save(&self.path);
+        self.update(|st| st.record(ev));
     }
     fn healthy(&mut self) {
-        self.state.mark_healthy(unix_now());
-        let _ = self.state.save(&self.path);
+        self.update(|st| {
+            st.mark_healthy(unix_now());
+        });
+    }
+    fn stopped(&mut self) {
+        self.update(|st| st.mark_clean_stop(unix_now(), "graceful shutdown"));
     }
 }
 

@@ -212,9 +212,7 @@ impl CrashState {
             std::fs::create_dir_all(dir)?;
         }
         let text = toml::to_string(self).map_err(std::io::Error::other)?;
-        let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, text)?;
-        std::fs::rename(&tmp, path)
+        crate::fsutil::write_atomic(path, text.as_bytes())
     }
 
     fn trim(&mut self) {
@@ -302,10 +300,80 @@ impl CrashState {
         self.record(Event::new(now, EventKind::SessionEnd, "guardian"));
     }
 
+    /// The guardian was stopped on purpose (graceful shutdown message, e.g.
+    /// from setup or `--restore-explorer`): the session ended cleanly.
+    pub fn mark_clean_stop(&mut self, now: u64, detail: &str) {
+        if let Some(s) = self.session.as_mut() {
+            s.ended_clean = true;
+        }
+        self.record(Event::new(now, EventKind::Exit, "guardian").with_detail(detail));
+    }
+
     /// Last `n` events as text lines, oldest first.
     pub fn last_lines(&self, n: usize) -> Vec<String> {
         let skip = self.events.len().saturating_sub(n);
         self.events[skip..].iter().map(Event::line).collect()
+    }
+}
+
+/// The crash log file plus its last known modification time. Every update
+/// re-reads the file first if another process changed it since (the
+/// guardian is the main writer, but `--restore-explorer` writes it when no
+/// guardian runs, and an old guardian may still be exiting), so no writer
+/// silently discards another one's records.
+#[derive(Debug)]
+pub struct CrashLogFile {
+    pub path: PathBuf,
+    pub state: CrashState,
+    stamp: Option<(std::time::SystemTime, u64)>,
+}
+
+fn file_stamp(path: &Path) -> Option<(std::time::SystemTime, u64)> {
+    let m = std::fs::metadata(path).ok()?;
+    Some((m.modified().ok()?, m.len()))
+}
+
+impl CrashLogFile {
+    /// Load `path` (see [`CrashState::load`]); returns the load error for
+    /// logging.
+    pub fn open(path: PathBuf) -> (Self, Option<String>) {
+        let stamp = file_stamp(&path);
+        let (state, err) = CrashState::load(&path);
+        (Self { path, state, stamp }, err)
+    }
+
+    /// Wrap an in-memory state (tests, callers that already loaded it).
+    pub fn with_state(path: PathBuf, state: CrashState) -> Self {
+        Self {
+            stamp: file_stamp(&path),
+            path,
+            state,
+        }
+    }
+
+    /// Re-read the file if it changed on disk since we last read or wrote
+    /// it. A file that became unreadable keeps the in-memory state.
+    pub fn refresh(&mut self) -> bool {
+        let now = file_stamp(&self.path);
+        if now == self.stamp || now.is_none() {
+            return false;
+        }
+        let (st, err) = CrashState::load(&self.path);
+        self.stamp = now;
+        if err.is_some() {
+            return false;
+        }
+        self.state = st;
+        true
+    }
+
+    /// Apply `f` to the up-to-date state and save.
+    pub fn update(&mut self, f: impl FnOnce(&mut CrashState)) -> std::io::Result<()> {
+        self.refresh();
+        f(&mut self.state);
+        let r = self.state.save(&self.path);
+        self.stamp = file_stamp(&self.path);
+        r
     }
 }
 
@@ -453,6 +521,45 @@ mod tests {
         assert_eq!(
             s.begin_shell_session(2000),
             SigninDecision::Normal { failed_signins: 1 }
+        );
+    }
+
+    #[test]
+    fn file_updates_merge_foreign_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("crashlog.toml");
+        let (mut a, err) = CrashLogFile::open(p.clone());
+        assert!(err.is_none());
+        a.update(|s| {
+            s.begin_shell_session(10);
+        })
+        .unwrap();
+        // Another process records a restore.
+        let (mut b, _) = CrashLogFile::open(p.clone());
+        b.update(|s| s.on_restored(20, false)).unwrap();
+        // Make sure the change is visible even on coarse-mtime filesystems
+        // (the length changed too).
+        a.update(|s| s.record(Event::new(30, EventKind::Start, "supervisor")))
+            .unwrap();
+        let (back, _) = CrashState::load(&p);
+        assert!(back.events.iter().any(|e| e.kind == EventKind::Restored));
+        assert!(back.events.iter().any(|e| e.at == 30));
+        assert!(back.session.is_none(), "the restore reset the session");
+        // No temporary files left behind.
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn clean_stop_counts_as_clean_session() {
+        let mut s = CrashState {
+            failed_signins: 2,
+            ..Default::default()
+        };
+        s.begin_shell_session(0);
+        s.mark_clean_stop(10, "graceful shutdown");
+        assert_eq!(
+            s.begin_shell_session(100),
+            SigninDecision::Normal { failed_signins: 0 }
         );
     }
 

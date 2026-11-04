@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Windows side of the guardian: crash log persistence, emergency hotkeys,
-//! session end, recovery dialogs, `--restore-explorer` and `--status` data.
-//! No COM is used here.
+//! graceful shutdown, session end, recovery dialogs, `--restore-explorer`
+//! and `--status` data. No COM is used here.
 
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use explorer_core::config::Config;
-use explorer_core::crashlog::{unix_now, CrashState, Event, FallbackDecision};
+use explorer_core::crashlog::{unix_now, CrashLogFile, CrashState, Event, FallbackDecision};
 use explorer_core::guardian::FallbackReason;
 use explorer_core::i18n::{tr, trf, Lang};
 use explorer_supervisor::guardian::{AfterFallback, Host, HostCommand};
@@ -20,20 +20,25 @@ use explorer_win::{dialog, process};
 const CAPTION: &str = "explorer.rs";
 
 struct Shared {
-    state: Mutex<CrashState>,
-    path: PathBuf,
+    log: Mutex<CrashLogFile>,
     ending: AtomicBool,
     commands: Mutex<Vec<HostCommand>>,
     shell: bool,
 }
 
 impl Shared {
+    /// Update the crash log (re-read first if another process wrote it).
     fn with_state(&self, f: impl FnOnce(&mut CrashState)) {
-        if let Ok(mut st) = self.state.lock() {
-            f(&mut st);
-            if let Err(e) = st.save(&self.path) {
+        if let Ok(mut log) = self.log.lock() {
+            if let Err(e) = log.update(f) {
                 tracing::warn!(error = %e, "cannot write crash log");
             }
+        }
+    }
+
+    fn push(&self, cmd: HostCommand) {
+        if let Ok(mut c) = self.commands.lock() {
+            c.push(cmd);
         }
     }
 }
@@ -47,10 +52,11 @@ pub struct WinHost {
 }
 
 impl WinHost {
-    pub fn new(state: CrashState, path: PathBuf, shell: bool, config: &Config) -> Self {
+    /// `resume`: restarted by setup after an update; the shell duties
+    /// (startup apps, ready events) already ran in this sign-in.
+    pub fn new(log: CrashLogFile, shell: bool, resume: bool, config: &Config) -> Self {
         let shared = Arc::new(Shared {
-            state: Mutex::new(state),
-            path,
+            log: Mutex::new(log),
             ending: AtomicBool::new(false),
             commands: Mutex::new(Vec::new()),
             shell,
@@ -61,10 +67,11 @@ impl WinHost {
                 tracing::warn!("emergency hotkey: starting explorer.exe");
                 let _ = process::start_explorer();
             }
-            SysEvent::RestartAll => {
-                if let Ok(mut c) = s.commands.lock() {
-                    c.push(HostCommand::RestartAll);
-                }
+            SysEvent::RestartAll => s.push(HostCommand::RestartAll),
+            SysEvent::Shutdown => s.push(HostCommand::Shutdown),
+            SysEvent::Restored => {
+                tracing::warn!("Windows Explorer was restored as the shell (--restore-explorer)");
+                s.with_state(|st| st.on_restored(unix_now(), false));
             }
             SysEvent::QueryEndSession => {}
             SysEvent::SessionEnding => {
@@ -77,14 +84,21 @@ impl WinHost {
         if !explorer_win::session::spawn_listener(true, sink) {
             tracing::error!("could not start the hotkey/session thread");
         }
+        let duties = if shell {
+            NamedEvent::create(SHELL_DUTIES_EVENT)
+        } else {
+            None
+        };
+        if resume {
+            if let Some(e) = &duties {
+                // Mark the duties as done so no supervisor re-runs them.
+                e.set();
+            }
+        }
         Self {
             shared,
             lang: explorer_win::theme::ui_lang(config.general.language),
-            _duties_event: if shell {
-                NamedEvent::create(SHELL_DUTIES_EVENT)
-            } else {
-                None
-            },
+            _duties_event: duties,
         }
     }
 }
@@ -110,23 +124,8 @@ fn restore_shell() -> bool {
     }
 }
 
-/// Too many failed sign-ins: restore Windows Explorer permanently, start
-/// it and tell the user.
-pub fn auto_restore(lang: Lang, state: &mut CrashState, path: &Path) {
-    tracing::error!(
-        "explorer.rs failed in too many consecutive sign-ins; restoring Windows Explorer"
-    );
-    let ok = restore_shell();
+fn auto_restore_text(lang: Lang, ok: bool) -> &'static str {
     if ok {
-        state.on_restored(unix_now(), true);
-    }
-    if let Err(e) = state.save(path) {
-        tracing::warn!(error = %e, "cannot write crash log");
-    }
-    if !process::explorer_running() {
-        let _ = process::start_explorer();
-    }
-    let text = if ok {
         tr(
             lang,
             "explorer.rs did not start correctly in 3 sign-ins in a row, so Windows Explorer has been restored as your desktop permanently.\n\nTo use explorer.rs again, register it again with the installer. The logs are in %LOCALAPPDATA%\\explorer-rs\\logs.",
@@ -138,8 +137,32 @@ pub fn auto_restore(lang: Lang, state: &mut CrashState, path: &Path) {
             "explorer.rs did not start correctly in 3 sign-ins in a row, but Windows Explorer could not be restored automatically. Please run \"Restore Windows Explorer\" from the Start menu, or see docs\\RECOVERY.md.",
             "explorer.rs no se inició correctamente en 3 inicios de sesión seguidos, pero no se pudo restaurar el Explorador de Windows automáticamente. Ejecuta \"Restaurar el Explorador de Windows\" desde el menú Inicio o consulta docs\\RECOVERY.md.",
         )
-    };
-    dialog::info(CAPTION, text);
+    }
+}
+
+/// Too many failed sign-ins: restore Windows Explorer permanently, start
+/// it and tell the user. `record` stores the restore in the crash log.
+fn auto_restore_with(lang: Lang, record: impl FnOnce()) {
+    tracing::error!(
+        "explorer.rs failed in too many consecutive sign-ins; restoring Windows Explorer"
+    );
+    let ok = restore_shell();
+    if ok {
+        record();
+    }
+    if !process::explorer_shell_running() {
+        let _ = process::start_explorer();
+    }
+    dialog::info(CAPTION, auto_restore_text(lang, ok));
+}
+
+/// [`auto_restore_with`] at sign-in, before any guardian loop runs.
+pub fn auto_restore(lang: Lang, log: &mut CrashLogFile) {
+    auto_restore_with(lang, || {
+        if let Err(e) = log.update(|st| st.on_restored(unix_now(), true)) {
+            tracing::warn!(error = %e, "cannot write crash log");
+        }
+    });
 }
 
 impl Host for WinHost {
@@ -161,12 +184,12 @@ impl Host for WinHost {
             .with_state(|st| decision = st.on_fallback(unix_now(), reason.as_str()));
         match decision {
             FallbackDecision::AutoRestore => {
-                // Work on a copy: the dialog is modal and the session-end
-                // handler must never wait for this lock.
-                let copy = self.shared.state.lock().ok().map(|st| st.clone());
-                if let Some(mut st) = copy {
-                    auto_restore(lang, &mut st, &self.shared.path);
-                }
+                // The lock is only taken inside `record`, never across the
+                // modal dialog (the session-end handler must not wait).
+                let shared = self.shared.clone();
+                auto_restore_with(lang, move || {
+                    shared.with_state(|st| st.on_restored(unix_now(), true))
+                });
                 AfterFallback::Exit
             }
             FallbackDecision::Ask {
@@ -196,7 +219,7 @@ impl Host for WinHost {
                     self.shared
                         .with_state(|st| st.on_restored(unix_now(), false));
                 }
-                if !process::explorer_running() {
+                if !process::explorer_shell_running() {
                     let _ = process::start_explorer();
                 }
                 if restore {
@@ -219,10 +242,31 @@ impl Host for WinHost {
             });
         }
     }
+
+    fn explorer_shell_running(&self) -> bool {
+        process::explorer_shell_running()
+    }
+
+    fn request_stop(&mut self, pid: u32) -> bool {
+        process::post_shutdown(pid) > 0
+    }
+
+    fn stopped(&mut self) {
+        self.shared
+            .with_state(|st| st.mark_clean_stop(unix_now(), "graceful shutdown"));
+    }
 }
 
-/// `--restore-explorer`: restore the per-user shell, stop explorer.rs and
-/// start explorer.exe if it is not running.
+/// `--restore-explorer`: restore the per-user shell; if explorer.rs is the
+/// running shell, stop it (guardian first, gracefully) and start Windows
+/// Explorer.
+///
+/// Order: Windows Explorer is started only after explorer.rs's desktop and
+/// taskbar are gone, because explorer.exe opens a plain folder window
+/// instead of becoming the shell while another program owns the shell
+/// window. To never leave the user with an empty screen, explorer.exe is
+/// checked to exist before anything is stopped, and if it cannot be
+/// started afterwards explorer.rs is started again.
 pub fn restore_explorer_command(console: bool) -> i32 {
     let paths = explorer_core::paths::AppPaths::from_env();
     let (config, _) = Config::load_or_default(&paths.config_file());
@@ -234,29 +278,42 @@ pub fn restore_explorer_command(console: bool) -> i32 {
         config.general.log_keep_files,
     );
     let result = Hive::CurrentUser.restore_shell();
-    let log_path = explorer_core::crashlog::crashlog_file(&paths);
-    let (mut state, _) = CrashState::load(&log_path);
-    state.on_restored(unix_now(), false);
-    let _ = state.save(&log_path);
+    let guardian_pid = process::guardian_window()
+        .map(process::window_pid)
+        .filter(|&p| p != 0);
+    if result.is_ok() {
+        record_restore(&paths, guardian_pid.is_some());
+    }
 
-    let explorer_was_running = process::explorer_running();
-    if !explorer_was_running {
-        // Shell mode: stop explorer.rs (guardian first so nothing restarts),
-        // then start explorer.exe as the shell.
-        // SAFETY: plain query.
-        let me = unsafe { explorer_win::windows::Win32::System::Threading::GetCurrentProcessId() };
-        let mut ours: Vec<_> = process::session_processes()
-            .into_iter()
-            .filter(|p| p.pid != me && p.exe.to_ascii_lowercase().starts_with("explorer-rs"))
-            .collect();
-        ours.sort_by_key(|p| !p.exe.eq_ignore_ascii_case("explorer-rs.exe"));
-        for p in ours {
-            tracing::info!(pid = p.pid, exe = %p.exe, "stopping");
-            process::terminate(p.pid);
+    let mut start_failed = false;
+    if !process::explorer_shell_running() {
+        // explorer.rs is the shell: stop it, then start Windows Explorer.
+        if !process::explorer_path().exists() {
+            tracing::error!(path = %process::explorer_path().display(), "explorer.exe not found; explorer.rs keeps running");
+            start_failed = true;
+        } else {
+            stop_explorer_rs(guardian_pid);
+            if process::start_explorer().is_err() {
+                start_failed = true;
+                // Never leave an empty screen: bring explorer.rs back.
+                tracing::error!("starting explorer.exe failed; restarting explorer.rs");
+                if let Ok(me) = std::env::current_exe() {
+                    let _ = std::process::Command::new(me)
+                        .args(["--shell", "--resume"])
+                        .spawn();
+                }
+            }
         }
-        let _ = process::start_explorer();
     }
     let (code, text) = match result {
+        _ if start_failed => (
+            1,
+            tr(
+                lang,
+                "Windows Explorer could not be started. See docs\\RECOVERY.md for manual steps (Ctrl+Shift+Esc opens Task Manager: File > Run new task > explorer.exe).",
+                "No se pudo iniciar el Explorador de Windows. Consulta docs\\RECOVERY.md para los pasos manuales (Ctrl+Mayús+Esc abre el Administrador de tareas: Archivo > Ejecutar nueva tarea > explorer.exe).",
+            ),
+        ),
         Ok(true) => (
             0,
             tr(
@@ -293,15 +350,70 @@ pub fn restore_explorer_command(console: bool) -> i32 {
     code
 }
 
+/// Record the restore in the crash log. While a guardian runs it is the
+/// only writer, so it is asked to record it itself.
+fn record_restore(paths: &explorer_core::paths::AppPaths, guardian: bool) {
+    if guardian && process::post_to_guardian(explorer_core::ipc::MSG_RESTORED) {
+        tracing::info!("asked the guardian to record the restore");
+        return;
+    }
+    let (mut log, _) = CrashLogFile::open(explorer_core::crashlog::crashlog_file(paths));
+    if let Err(e) = log.update(|st| st.on_restored(unix_now(), false)) {
+        tracing::warn!(error = %e, "cannot write crash log");
+    }
+}
+
+/// Stop explorer.rs in this session: ask the guardian (identified by its
+/// hotkey window) to stop gracefully, then stop what is left (an orphaned
+/// supervisor, components) gracefully and finally terminate leftovers, the
+/// guardian first so nothing is restarted.
+fn stop_explorer_rs(guardian_pid: Option<u32>) {
+    if let Some(pid) = guardian_pid {
+        tracing::info!(pid, "asking the guardian to stop");
+        if process::post_to_guardian(explorer_core::ipc::MSG_SHUTDOWN)
+            && process::wait_exit(pid, Duration::from_secs(12))
+        {
+            tracing::info!("guardian stopped");
+        } else {
+            tracing::warn!(pid, "guardian did not stop; terminating it");
+            process::terminate(pid);
+            let _ = process::wait_exit(pid, Duration::from_secs(2));
+        }
+    }
+    // SAFETY: plain query.
+    let me = unsafe { explorer_win::windows::Win32::System::Threading::GetCurrentProcessId() };
+    let ours = || -> Vec<process::ProcessInfo> {
+        process::session_processes()
+            .into_iter()
+            .filter(|p| p.pid != me && explorer_core::guardian::is_shell_process(&p.exe))
+            .collect()
+    };
+    let left = ours();
+    if left.is_empty() {
+        return;
+    }
+    let pids: Vec<u32> = left.iter().map(|p| p.pid).collect();
+    process::post_shutdown_all(&pids);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && !ours().is_empty() {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // Supervisors (explorer-rs.exe) before components so nothing restarts.
+    let mut left = ours();
+    left.sort_by_key(|p| !p.exe.eq_ignore_ascii_case("explorer-rs.exe"));
+    for p in left {
+        tracing::info!(pid = p.pid, exe = %p.exe, "terminating");
+        process::terminate(p.pid);
+    }
+}
+
 /// Live data for `--status`.
 pub fn fill_status(info: &mut StatusInfo) {
     use explorer_win::session::mutex_exists;
     info.guardian_running = mutex_exists(crate::cli::GUARDIAN_MUTEX);
     info.supervisor_running = mutex_exists(crate::cli::SUPERVISOR_MUTEX);
     let procs = process::session_processes();
-    info.explorer_running = procs
-        .iter()
-        .any(|p| p.exe.eq_ignore_ascii_case("explorer.exe"));
+    info.explorer_running = process::explorer_shell_running();
     for (name, running) in info.components.iter_mut() {
         let exe = format!("explorer-rs-{name}.exe");
         *running = procs.iter().any(|p| p.exe.eq_ignore_ascii_case(&exe));

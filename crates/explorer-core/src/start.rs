@@ -2,7 +2,6 @@
 //! Start menu state: pinned apps (persisted) and default pins.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -50,20 +49,6 @@ pub enum Reload {
     /// The file could not be read; the in-memory pins were kept. Call
     /// `reload` again later (do not record the file's modification time).
     Retry,
-}
-
-/// Makes temporary file names unique within this process.
-static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// A temporary file name next to `path`, unique per process and call
-/// (the taskbar and the Start menu write the same pins file).
-pub fn unique_tmp_path(path: &Path) -> std::path::PathBuf {
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "file".into());
-    let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    path.with_file_name(format!("{name}.{}.{n}.tmp", std::process::id()))
 }
 
 /// Default taskbar pins (Windows 11 defaults), same matching rules as
@@ -168,14 +153,7 @@ impl Pins {
             ));
         }
         let s = toml::to_string(self).map_err(std::io::Error::other)?;
-        let tmp = unique_tmp_path(path);
-        if let Err(e) = std::fs::write(&tmp, s) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e);
-        }
-        std::fs::rename(&tmp, path).inspect_err(|_| {
-            let _ = std::fs::remove_file(&tmp);
-        })
+        crate::fsutil::write_atomic(path, s.as_bytes())
     }
 
     pub fn contains(&self, t: &LaunchTarget) -> bool {
@@ -398,17 +376,6 @@ mod tests {
         };
         assert_eq!(p.reload(&d.path().join("none.toml")), Reload::Replaced);
         assert_eq!(p, Pins::default());
-    }
-
-    #[test]
-    fn temp_names_are_unique() {
-        let p = Path::new("/x/pins.toml");
-        let a = unique_tmp_path(p);
-        let b = unique_tmp_path(p);
-        assert_ne!(a, b);
-        let name = a.file_name().unwrap().to_string_lossy().into_owned();
-        assert!(name.starts_with("pins.toml."));
-        assert!(name.contains(&std::process::id().to_string()));
     }
 
     #[test]

@@ -27,8 +27,84 @@ pub const GUARDED_ENV: &str = "EXPLORER_RS_GUARDED";
 pub const BOOT_WINDOW_MS: u64 = 120_000;
 /// This many failures inside [`BOOT_WINDOW_MS`] are a boot loop.
 pub const BOOT_LOOP_FAILURES: usize = 3;
-/// Delay before retrying when another supervisor holds the instance lock.
+/// First delay before retrying when another supervisor holds the instance
+/// lock; doubles on every further attempt up to
+/// [`ALREADY_RUNNING_MAX_RETRY_MS`].
 pub const ALREADY_RUNNING_RETRY_MS: u64 = 5_000;
+/// Upper bound of the "another supervisor is running" retry delay.
+pub const ALREADY_RUNNING_MAX_RETRY_MS: u64 = 60_000;
+/// Environment variable set by the guardian on the supervisor: the
+/// guardian's process id. The supervisor watches that process and handles
+/// fallbacks itself once the guardian is gone.
+pub const GUARDIAN_PID_ENV: &str = "EXPLORER_RS_GUARDIAN_PID";
+
+/// Delay before the `streak`-th consecutive retry (1-based) after
+/// [`EXIT_ALREADY_RUNNING`]: 5 s, 10 s, 20 s, 40 s, then 60 s.
+pub fn already_running_delay(streak: u32) -> u64 {
+    let shift = streak.saturating_sub(1).min(16);
+    ALREADY_RUNNING_RETRY_MS
+        .saturating_mul(1u64 << shift)
+        .min(ALREADY_RUNNING_MAX_RETRY_MS)
+}
+
+/// The guardian's pid as passed to a supervisor, if it runs guarded
+/// (`GUARDED_ENV` = "1") and the pid is valid.
+pub fn guardian_pid(guarded: Option<&str>, pid: Option<&str>) -> Option<u32> {
+    if guarded != Some("1") {
+        return None;
+    }
+    pid.and_then(|p| p.trim().parse::<u32>().ok())
+        .filter(|&p| p != 0)
+}
+
+/// Mode to start the supervisor in. A shell-mode guardian starts it in dev
+/// mode while the Windows Explorer shell runs (after a fallback where the
+/// user kept explorer.rs, or when restarted by Ctrl+Alt+Shift+R), so two
+/// shells never fight over the taskbar and the desktop.
+pub fn supervisor_mode(shell_guardian: bool, explorer_shell_running: bool) -> crate::ipc::RunMode {
+    if shell_guardian && !explorer_shell_running {
+        crate::ipc::RunMode::Shell
+    } else {
+        crate::ipc::RunMode::Dev
+    }
+}
+
+/// Executables that make up a running explorer.rs shell (guardian or
+/// supervisor, components). Not setup, the uninstaller or the elevated
+/// index helper.
+pub const SHELL_PROCESSES: &[&str] = &[
+    "explorer-rs.exe",
+    "explorer-rs-taskbar.exe",
+    "explorer-rs-launcher.exe",
+    "explorer-rs-desktop.exe",
+    "explorer-rs-indexd.exe",
+];
+
+/// True if `image` (file name or full path) is one of [`SHELL_PROCESSES`].
+pub fn is_shell_process(image: &str) -> bool {
+    let name = image.rsplit(['\\', '/']).next().unwrap_or(image);
+    SHELL_PROCESSES.iter().any(|p| p.eq_ignore_ascii_case(name))
+}
+
+/// True if `image` (a file name or full path) is Windows Explorer.
+pub fn is_explorer_image(image: &str) -> bool {
+    image
+        .rsplit(['\\', '/'])
+        .next()
+        .is_some_and(|n| n.eq_ignore_ascii_case("explorer.exe"))
+}
+
+/// "The Windows Explorer shell is running": the process owning the shell
+/// window (`GetShellWindow`) or a `Shell_TrayWnd` window is explorer.exe.
+/// A File Explorer window (also explorer.exe) owns neither, and our own
+/// `Shell_TrayWnd` belongs to explorer-rs-taskbar.exe, so neither counts.
+pub fn explorer_shell_running<'a>(
+    shell_window_owner: Option<&str>,
+    tray_window_owners: impl IntoIterator<Item = &'a str>,
+) -> bool {
+    shell_window_owner.is_some_and(is_explorer_image)
+        || tray_window_owners.into_iter().any(is_explorer_image)
+}
 
 /// True if `failures_ms` (milliseconds since the session started) contain
 /// a boot loop.
@@ -73,6 +149,7 @@ pub struct GuardianPolicy {
     shell: bool,
     tracker: RestartTracker,
     failures_ms: Vec<u64>,
+    already_running: u32,
 }
 
 impl GuardianPolicy {
@@ -81,7 +158,13 @@ impl GuardianPolicy {
             shell,
             tracker: RestartTracker::new(cfg),
             failures_ms: Vec::new(),
+            already_running: 0,
         }
+    }
+
+    /// Consecutive [`EXIT_ALREADY_RUNNING`] exits so far.
+    pub fn already_running_streak(&self) -> u32 {
+        self.already_running
     }
 
     /// The supervisor exited. `since_session_ms` = time since the guardian
@@ -96,6 +179,16 @@ impl GuardianPolicy {
         if session_ending {
             return GuardianDecision::Exit;
         }
+        if code == Some(EXIT_ALREADY_RUNNING) {
+            // Another supervisor (e.g. orphaned by a guardian that died)
+            // holds the lock: back off instead of polling every 5 s.
+            self.already_running = self.already_running.saturating_add(1);
+            return GuardianDecision::Restart {
+                delay_ms: already_running_delay(self.already_running),
+                crash: false,
+            };
+        }
+        self.already_running = 0;
         match code {
             Some(EXIT_STOP) | Some(EXIT_SHUTDOWN_ALL) => return GuardianDecision::Exit,
             Some(EXIT_FALLBACK) => {
@@ -108,12 +201,6 @@ impl GuardianPolicy {
             Some(EXIT_RESTART) => {
                 return GuardianDecision::Restart {
                     delay_ms: 0,
-                    crash: false,
-                }
-            }
-            Some(EXIT_ALREADY_RUNNING) => {
-                return GuardianDecision::Restart {
-                    delay_ms: ALREADY_RUNNING_RETRY_MS,
                     crash: false,
                 }
             }
@@ -139,6 +226,7 @@ impl GuardianPolicy {
     pub fn reset(&mut self, cfg: &SupervisorConfig) {
         self.tracker = RestartTracker::new(cfg);
         self.failures_ms.clear();
+        self.already_running = 0;
     }
 }
 
@@ -193,12 +281,100 @@ mod tests {
                 crash: false
             }
         );
+        assert_eq!(p.already_running_streak(), 1);
         assert_eq!(p.on_exit(Some(5), 10, 10, true), GuardianDecision::Exit);
         let mut dev = GuardianPolicy::new(&cfg(), false);
         assert_eq!(
             dev.on_exit(Some(EXIT_FALLBACK), 10, 10, false),
             GuardianDecision::Exit
         );
+    }
+
+    #[test]
+    fn already_running_backs_off() {
+        assert_eq!(already_running_delay(1), 5_000);
+        assert_eq!(already_running_delay(2), 10_000);
+        assert_eq!(already_running_delay(4), 40_000);
+        assert_eq!(already_running_delay(5), 60_000);
+        assert_eq!(already_running_delay(u32::MAX), 60_000);
+        let mut p = GuardianPolicy::new(&cfg(), true);
+        let delays: Vec<u64> = (0..6)
+            .map(
+                |_| match p.on_exit(Some(EXIT_ALREADY_RUNNING), 10, 10, false) {
+                    GuardianDecision::Restart { delay_ms, crash } => {
+                        assert!(!crash);
+                        delay_ms
+                    }
+                    d => panic!("{d:?}"),
+                },
+            )
+            .collect();
+        assert_eq!(delays, [5_000, 10_000, 20_000, 40_000, 60_000, 60_000]);
+        // Any other exit (the supervisor finally ran) resets the streak.
+        let _ = p.on_exit(Some(EXIT_RESTART), 10, 10, false);
+        assert_eq!(p.already_running_streak(), 0);
+        let _ = p.on_exit(Some(EXIT_ALREADY_RUNNING), 10, 10, false);
+        p.reset(&cfg());
+        assert_eq!(p.already_running_streak(), 0);
+    }
+
+    #[test]
+    fn guardian_pid_parsing() {
+        assert_eq!(guardian_pid(Some("1"), Some("1234")), Some(1234));
+        assert_eq!(guardian_pid(Some("1"), Some(" 42 ")), Some(42));
+        assert_eq!(guardian_pid(Some("1"), Some("0")), None);
+        assert_eq!(guardian_pid(Some("1"), Some("x")), None);
+        assert_eq!(guardian_pid(Some("1"), None), None);
+        assert_eq!(guardian_pid(None, Some("1234")), None);
+        assert_eq!(guardian_pid(Some("0"), Some("1234")), None);
+    }
+
+    #[test]
+    fn supervisor_mode_never_starts_a_second_shell() {
+        use crate::ipc::RunMode;
+        assert_eq!(supervisor_mode(true, false), RunMode::Shell);
+        assert_eq!(supervisor_mode(true, true), RunMode::Dev);
+        assert_eq!(supervisor_mode(false, false), RunMode::Dev);
+        assert_eq!(supervisor_mode(false, true), RunMode::Dev);
+    }
+
+    #[test]
+    fn shell_process_names() {
+        assert!(is_shell_process("explorer-rs.exe"));
+        assert!(is_shell_process(
+            r"C:\Program Files\explorer-rs\EXPLORER-RS-TASKBAR.EXE"
+        ));
+        assert!(is_shell_process("explorer-rs-indexd.exe"));
+        assert!(!is_shell_process("explorer-rs-setup.exe"));
+        assert!(!is_shell_process("explorer-rs-index-helper.exe"));
+        assert!(!is_shell_process("explorer.exe"));
+    }
+
+    #[test]
+    fn explorer_shell_detection() {
+        assert!(is_explorer_image(r"C:\Windows\explorer.exe"));
+        assert!(is_explorer_image("EXPLORER.EXE"));
+        assert!(!is_explorer_image(
+            r"C:\Program Files\explorer-rs\explorer-rs-taskbar.exe"
+        ));
+        assert!(!is_explorer_image(r"C:\x\notexplorer.exe"));
+        // Shell window owned by explorer.exe.
+        assert!(explorer_shell_running(Some(r"C:\Windows\explorer.exe"), []));
+        // Only our own tray window (explorer.rs is the shell), plus a File
+        // Explorer window that owns no shell window: not the Explorer shell.
+        assert!(!explorer_shell_running(
+            Some(r"C:\Program Files\explorer-rs\explorer-rs-desktop.exe"),
+            [r"C:\Program Files\explorer-rs\explorer-rs-taskbar.exe"]
+        ));
+        assert!(!explorer_shell_running(None, []));
+        // Dev mode: our tray window sits in front of Explorer's.
+        assert!(explorer_shell_running(
+            None,
+            [
+                r"C:\Program Files\explorer-rs\explorer-rs-taskbar.exe",
+                r"C:\Windows\explorer.exe"
+            ]
+        ));
     }
 
     #[test]

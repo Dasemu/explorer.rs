@@ -34,8 +34,8 @@ impl StatusInfo {
             self.explorer_running,
         ) {
             (false, _) => "not running",
-            (true, true) => "dev (explorer.exe is running)",
-            (true, false) => "shell (explorer.exe is not running)",
+            (true, true) => "dev (the Windows Explorer shell is running)",
+            (true, false) => "shell (the Windows Explorer shell is not running)",
         }
     }
 }
@@ -55,7 +55,7 @@ pub fn render(s: &StatusInfo) -> String {
     let _ = writeln!(o, "mode:        {}", s.mode());
     let _ = writeln!(o, "guardian:    {}", yes(s.guardian_running));
     let _ = writeln!(o, "supervisor:  {}", yes(s.supervisor_running));
-    let _ = writeln!(o, "explorer.exe: {}", yes(s.explorer_running));
+    let _ = writeln!(o, "Windows Explorer shell: {}", yes(s.explorer_running));
     let _ = writeln!(o, "components:");
     for (name, running) in &s.components {
         let _ = writeln!(o, "  {name:<10} {}", yes(*running));
@@ -107,7 +107,7 @@ mod tests {
             ..Default::default()
         };
         let r = render(&s);
-        assert!(r.contains("shell (explorer.exe is not running)"));
+        assert!(r.contains("shell (the Windows Explorer shell is not running)"));
         assert!(r.contains("taskbar    running"));
         assert!(r.contains("launcher   not running"));
         assert!(r.contains("explorer.rs (\""));

@@ -40,6 +40,31 @@ pub enum SysEvent {
     /// The session is ending (sign-out, restart, shutdown). The callback
     /// runs synchronously; after it returns the process may be killed.
     SessionEnding,
+    /// `ExplorerRs.Shutdown` received: stop gracefully (setup,
+    /// `--restore-explorer`, or the guardian stopping its supervisor).
+    Shutdown,
+    /// `ExplorerRs.Restored` received (guardian only): `--restore-explorer`
+    /// restored Windows Explorer as the shell; record it in the crash log.
+    Restored,
+}
+
+/// The registered `ExplorerRs.Restored` message.
+pub fn restored_message() -> u32 {
+    crate::ipc::registered_message(explorer_core::ipc::MSG_RESTORED)
+}
+
+/// Map our registered messages to events (shared by both windows).
+fn registered_event(msg: u32) -> Option<SysEvent> {
+    if msg < explorer_core::ipc::REGISTERED_FIRST {
+        return None;
+    }
+    if msg == crate::window::shutdown_message() {
+        Some(SysEvent::Shutdown)
+    } else if msg == restored_message() {
+        Some(SysEvent::Restored)
+    } else {
+        None
+    }
 }
 
 pub type Sink = Arc<dyn Fn(SysEvent) + Send + Sync>;
@@ -55,6 +80,10 @@ struct SessionWatch {
 
 impl Handler for SessionWatch {
     fn handle(&mut self, _: HWND, msg: u32, wparam: WPARAM, _: LPARAM) -> Option<LRESULT> {
+        if let Some(ev) = registered_event(msg) {
+            (self.sink)(ev);
+            return Some(LRESULT(0));
+        }
         match msg {
             WM_QUERYENDSESSION => {
                 (self.sink)(SysEvent::QueryEndSession);
@@ -77,6 +106,10 @@ struct Hotkeys {
 
 impl Handler for Hotkeys {
     fn handle(&mut self, hwnd: HWND, msg: u32, wparam: WPARAM, _: LPARAM) -> Option<LRESULT> {
+        if let Some(ev) = registered_event(msg) {
+            (self.sink)(ev);
+            return Some(LRESULT(0));
+        }
         match msg {
             WM_HOTKEY => {
                 match wparam.0 as i32 {
@@ -139,10 +172,10 @@ pub fn spawn_listener(hotkeys: bool, sink: Sink) -> bool {
                 tracing::error!(error = %e, "session watch window failed; sign-out is not detected");
             }
             if hotkeys {
-                window::register_class("ExplorerRs.Hotkeys", None);
+                window::register_class(explorer_core::ipc::GUARDIAN_WINDOW_CLASS, None);
                 match window::create(
                     CreateParams {
-                        class: "ExplorerRs.Hotkeys",
+                        class: explorer_core::ipc::GUARDIAN_WINDOW_CLASS,
                         title: "",
                         style: Default::default(),
                         ex_style: Default::default(),
@@ -257,24 +290,18 @@ pub fn mutex_exists(name: &str) -> bool {
 /// Ask the running guardian to restart all components (same as
 /// Ctrl+Alt+Shift+R). Returns false if no guardian window was found.
 pub fn request_restart_all() -> bool {
-    use windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, PostMessageW};
-    let class = WideString::new("ExplorerRs.Hotkeys");
-    // SAFETY: valid class name; posting never blocks.
+    use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+    let Some(h) = crate::process::guardian_window() else {
+        return false;
+    };
+    // SAFETY: posting never blocks.
     unsafe {
-        match FindWindowExW(
-            Some(HWND_MESSAGE),
-            None,
-            class.pcwstr(),
-            windows::core::PCWSTR::null(),
-        ) {
-            Ok(h) if !h.is_invalid() => PostMessageW(
-                Some(h),
-                WM_HOTKEY,
-                WPARAM(HOTKEY_RESTART as usize),
-                LPARAM(0),
-            )
-            .is_ok(),
-            _ => false,
-        }
+        PostMessageW(
+            Some(h),
+            WM_HOTKEY,
+            WPARAM(HOTKEY_RESTART as usize),
+            LPARAM(0),
+        )
     }
+    .is_ok()
 }
