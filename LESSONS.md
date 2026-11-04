@@ -94,3 +94,11 @@ Non-obvious findings. Add an entry whenever something surprises you.
 - **cargo-fuzz inside a nested checkout** (git worktree below the main repo)
   picks up the parent directory's workspace; `fuzz/Cargo.toml` needs its own
   `[workspace]` table.
+- **Synchronous messages to our own window are dropped while its handler
+  runs.** `SetWindowPos`, `ShowWindow`, `SetWindowTextW` on a child EDIT
+  re-enter the window procedure and fall back to `DefWindowProcW`, so the
+  Start menu resizes its render target, lays out the EDIT and paints its
+  first frame itself after showing, instead of relying on WM_SIZE/WM_PAINT.
+- **Fuzzy matching on keywords is noisy.** Matching settings keywords with
+  the fuzzy scorer made "informe" find "About" (via "información"); keywords
+  now only count on a word-prefix match, names stay fuzzy.
