@@ -446,9 +446,15 @@ impl TaskbarPins {
         let mtime = std::fs::metadata(&self.path)
             .and_then(|m| m.modified())
             .ok();
-        if mtime != self.mtime || mtime.is_none() {
-            self.pins = Pins::load(&self.path);
-            self.mtime = mtime;
+        if mtime != self.mtime || mtime.is_none() || self.pins.unreadable {
+            // A transient read failure keeps the pins in memory (and
+            // `Pins::save` refuses to overwrite the file) until the next
+            // successful read.
+            if self.pins.reload(&self.path) != explorer_core::start::Reload::Retry {
+                self.mtime = std::fs::metadata(&self.path)
+                    .and_then(|m| m.modified())
+                    .ok();
+            }
         }
         &mut self.pins
     }
@@ -1212,6 +1218,7 @@ impl Launcher {
             }
             Action::PinStart | Action::UnpinStart => {
                 if let Target::App(t) = &row.target {
+                    self.pins.retry_if_unreadable(&self.paths.pins_file());
                     if action == Action::PinStart {
                         self.pins.pin(t);
                     } else {
@@ -1290,7 +1297,7 @@ impl Launcher {
         }
     }
 
-    fn save_pins(&self) {
+    fn save_pins(&mut self) {
         if let Err(e) = self.pins.save(&self.paths.pins_file()) {
             tracing::warn!(error = %e, "cannot save pins");
         }
@@ -1516,6 +1523,7 @@ impl Launcher {
         invalidate(hwnd);
         if cmd == CMD_MOVE_FRONT {
             if let Target::App(t) = &row.target {
+                self.pins.retry_if_unreadable(&self.paths.pins_file());
                 self.pins.move_to_front(t);
                 self.save_pins();
                 self.pin_page = 0;
@@ -2810,6 +2818,7 @@ impl Handler for Launcher {
                         IndexMsg::Catalog(entries) => {
                             self.catalog = Catalog::build(entries);
                             self.indexed_at = Some(Instant::now());
+                            self.pins.retry_if_unreadable(&self.paths.pins_file());
                             if self.pins.seed_defaults(&self.catalog) {
                                 self.save_pins();
                             }

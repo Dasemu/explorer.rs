@@ -116,19 +116,25 @@ impl PinStore {
         }
     }
 
-    /// Returns true if the file changed and was re-read.
+    /// Returns true if the file changed and was re-read. A file that could
+    /// not be read keeps the pins in memory and is retried next time.
     pub fn reload_if_changed(&mut self) -> bool {
         let m = mtime(&self.path);
-        if m != self.mtime {
-            self.pins = Pins::load(&self.path);
-            self.mtime = m;
-            true
+        if m != self.mtime || self.pins.unreadable {
+            match self.pins.reload(&self.path) {
+                explorer_core::start::Reload::Retry => false,
+                _ => {
+                    self.mtime = mtime(&self.path);
+                    true
+                }
+            }
         } else {
             false
         }
     }
 
     pub fn save(&mut self) {
+        self.pins.retry_if_unreadable(&self.path);
         if let Err(e) = self.pins.save(&self.path) {
             tracing::warn!(error = %e, path = %self.path.display(), "cannot save taskbar pins");
         }
