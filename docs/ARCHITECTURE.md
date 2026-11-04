@@ -8,45 +8,85 @@ web content anywhere.
 ## Processes
 
 ```
-explorer-rs.exe  (supervisor, --dev | --shell)
- ├── explorer-rs-taskbar.exe   one AppBar per monitor, window list, clock,
- │                             Win-key hook, shell hooks
- └── explorer-rs-launcher.exe  hidden popup; app index + fuzzy search
+explorer-rs-setup.exe / uninstall.exe   installer and uninstaller (elevated)
+explorer-rs.exe  (guardian, --dev | --shell)
+ └── explorer-rs.exe --supervise   (supervisor, kill-on-close job object)
+      ├── explorer-rs-taskbar.exe   taskbar: bars, window list, grouping,
+      │                             pins, tray, quick settings, calendar,
+      │                             Win-key hook, shell hooks
+      ├── explorer-rs-launcher.exe  Windows 11-style Start menu + search
+      ├── explorer-rs-desktop.exe   wallpaper desktop (shell mode)
+      └── explorer-rs-indexd.exe    file-name index daemon (optional)
+           └── explorer-rs-index-helper.exe   elevated MFT/USN helper,
+                                              started by a scheduled task
 ```
 
+- **Guardian** (`explorer-rs.exe --dev|--shell`): not in a job object, no COM.
+  It starts and restarts the supervisor, owns the emergency hotkeys
+  (Ctrl+Alt+Shift+E starts Windows Explorer, Ctrl+Alt+Shift+R restarts
+  everything), keeps the crash log
+  (`%LOCALAPPDATA%\explorer-rs\state\crashlog.toml`), and is the only
+  process that talks to the user about recovery (crash-loop dialog,
+  automatic restore of Windows Explorer after 3 failed sign-ins).
+  `explorer-rs.exe --restart` posts the restart command to its message-only
+  window (class `ExplorerRs.Hotkeys`). Details: [SHELL-MODE.md](SHELL-MODE.md),
+  [RECOVERY.md](RECOVERY.md), ADR 0014.
+- **Supervisor** (`--supervise`): runs the components from
+  `supervisor.components`, hot-reloads `config.toml` (2 s polling,
+  per-component restart) and detects session end so sign-out does not count
+  as a crash. `supervisor.file_search` (auto/on/off, or the installer's
+  `HKLM\Software\explorer-rs\FileSearch`) decides whether `indexd` runs.
 - Each component is a separate process (ADR 0002). The supervisor restarts a
   crashed component with exponential backoff (500 ms doubling to 30 s, reset
   after 60 s of healthy uptime). It gives up on a component after more than
   5 crashes in 60 s. Other components are unaffected.
 - Exit codes: `0` stop (no restart), `77` quit all of explorer.rs, `78`
-  restart now. Anything else counts as a crash.
-- Children are placed in a kill-on-close job object, so they die with the
+  restart that component, `79` fallback to Windows Explorer needed
+  (supervisor to guardian), `80` supervisor already running. Anything else
+  counts as a crash.
+- Components are in a kill-on-close job object, so they die with the
   supervisor (no orphaned AppBars).
-- In shell mode, if the taskbar is given up on, the supervisor starts
-  `explorer.exe` as a last-resort UI.
-- Every binary is single-instance per session (named mutex).
+- If the taskbar is given up on in shell mode, the guardian offers to start
+  Windows Explorer (crash-loop dialog).
+- Every binary is single-instance per session (named mutex). The desktop
+  component exits immediately unless `[desktop] enabled` says otherwise
+  (default `shell`: only in shell mode).
+- **Installer** (`explorer-rs-setup.exe`, copied as `uninstall.exe`): a Win32
+  wizard or silent CLI. It copies the binaries, registers the start mode
+  (alongside / shell / none), creates the `\explorer-rs\IndexHelper` and
+  `\explorer-rs\Launch` scheduled tasks and shortcuts (including "Restore
+  Windows Explorer", which runs `explorer-rs.exe --restore-explorer`), and
+  writes `%ProgramData%\explorer-rs\setup.log`. See
+  [PACKAGING.md](PACKAGING.md), [INSTALL.md](INSTALL.md), ADR 0013.
 
 ## Inter-process communication
 
 Deliberately minimal (ADR 0002): components find each other by window class
-(`ExplorerRs.Launcher`, `ExplorerRs.Taskbar`) and talk with the registered
-window message `ExplorerRs.LauncherCommand` (wParam: 0 toggle, 1 show,
-2 hide). A message to a dead peer is simply dropped. Before posting, the
-taskbar calls `AllowSetForegroundWindow` for the launcher's PID, so the
-launcher may take the foreground.
+(`ExplorerRs.Launcher`, `ExplorerRs.Taskbar`, `ExplorerRs.Hotkeys`) and talk
+with registered window messages such as `ExplorerRs.LauncherCommand` (wParam:
+0 toggle, 1 show, 2 hide). A message to a dead peer is simply dropped. Before
+posting, the taskbar calls `AllowSetForegroundWindow` for the launcher's PID,
+so the launcher may take the foreground. The file index uses a per-user named
+pipe ([IPC-PROTOCOL.md](IPC-PROTOCOL.md)).
 
 ## Crates
 
 | Crate | Kind | Contents | Tested on Linux |
 |---|---|---|---|
-| `explorer-core` | lib | config, paths, logging, app catalog + launch history, fuzzy search (`nucleo-matcher`), window-filter rules, taskbar model, Win-key state machine, supervisor policy, layout/hit-testing, clock formatting | yes, fully |
-| `explorer-win` | lib | thin Win32/COM wrappers; empty on non-Windows | compiles only |
-| `explorer-supervisor` | bin `explorer-rs` | process supervision | yes (CLI + policy) |
+| `explorer-core` | lib | config, paths, logging, app catalog + launch history, fuzzy search (`nucleo-matcher`), window-filter rules, taskbar model/groups/layout, tray promotion, calendar, system glyphs, Win-key state machine, supervisor policy, `crashlog`, `guardian`, `components`, `startup`, `wallpaper`, `setup`, Start menu logic (`settings_pages`, `calc`, `run_command`, `recent`, `results`) | yes, fully |
+| `explorer-win` | lib | thin Win32/COM wrappers (theme, icons, tray, quick settings back-ends, `session`, `process`, `registry`, `startup`, `wallpaper`, `desktop`, `dialog`); empty on non-Windows | compiles only |
+| `explorer-supervisor` | bin `explorer-rs` | guardian and supervisor (`--supervise`), `--status`, `--edit-config`, `--restore-explorer`, `--restart` | yes (CLI + policy) |
 | `explorer-taskbar` | bin `explorer-rs-taskbar` | taskbar UI | cross-compiled |
-| `explorer-launcher` | bin `explorer-rs-launcher` | launcher UI | cross-compiled |
+| `explorer-launcher` | bin `explorer-rs-launcher` | Start menu UI | cross-compiled |
+| `explorer-desktop` | bin `explorer-rs-desktop` | wallpaper desktop window (Progman, `SetShellWindow`) | cross-compiled |
+| `explorer-setup` | bins `explorer-rs-setup` (+ `uninstall.exe` copy), `explorer-setup-pack` (host tool) | installer/uninstaller: pure planning in `payload`, `cli`, `plan`, `task_xml`; Win32 execution and wizard in `win` | planning yes; wizard cross-compiled |
 | `explorer-index` | lib | file-name index engine, queries, snapshots, USN/MFT parsing and replay, walker, IPC protocol; `win::` FSCTL backend and watcher | yes (Windows parts compile only) |
-| `explorer-indexd` | bins `explorer-rs-indexd`, `explorer-rs-index-helper` | index daemon + CLI, elevated MFT/USN helper | yes (daemon end-to-end over Unix sockets) |
 | `explorer-index-client` | lib | non-blocking index client | yes |
+| `explorer-indexd` | bins `explorer-rs-indexd`, `explorer-rs-index-helper` | index daemon + CLI, elevated MFT/USN helper | yes (daemon end-to-end over Unix sockets) |
+
+`assets/` holds the icon (and its generator), the manifest template and the
+shared resource build script used by every binary's `build.rs` (icon,
+PerMonitorV2/comctl32 v6/long-path/UTF-8 manifest, version info).
 
 Rule: decisions live in `explorer-core` as pure functions over plain data.
 `explorer-win` only collects data from the OS and executes actions. For
@@ -84,6 +124,18 @@ button, and why.
   Start menu does not also open, then toggles the launcher. No key is ever
   swallowed, so Win+E, Win+L etc. keep working.
 
+- Process layout (details: [TASKBAR.md](TASKBAR.md)): the controller window
+  owns the model, hooks, timers and workers; one `Bar` per monitor; one
+  reusable flyout window (window picker, "..." overflow, tray overflow, quick
+  settings, calendar). Worker threads: `taskbar-shell` (STA: icons,
+  AppsFolder catalog) and `taskbar-sys` (MTA: WASAPI, NLM, WMI).
+- Features: grouping of windows by app (AUMID/exe, `taskbar.combine`), pins
+  shared with the Start menu (`taskbar-pins.toml`, reloaded on mtime change,
+  drag to reorder), window picker with DWM thumbnails, show-desktop corner,
+  bilingual menus and tooltips.
+- Pure logic in `explorer-core`: `taskbar_groups`, `taskbar_layout`,
+  `flyout_layout`, `tray_promotion`, `shellpath`, `calendar`, `system_glyphs`.
+
 ## Theme and alignment
 
 `explorer-win::theme` reads the Windows personalisation settings from HKCU:
@@ -107,14 +159,16 @@ premultiplied BGRA). Each render target caches its own GPU copy.
 | Windows | AppUserModelID from the window property store (packaged apps / UWP frames), then `WM_GETICON` (with `SendMessageTimeout`), then the class icon, then the process image |
 | Tray | `HICON` drawn into a 32-bit DIB; alpha is derived from the mask for legacy icons |
 
-## System tray
+## System tray and quick settings
 
-- Pure protocol parsing and the icon model live in `explorer_core::tray`
-  (unit-tested, including truncated input).
-- `explorer-win::tray` hosts a `Shell_TrayWnd` window. Its icons are shown
-  on the primary monitor's bar. Clicks are forwarded to the owning
-  application using the documented `NOTIFYICON_VERSION_4` or legacy callback
-  semantics.
+- Pure protocol parsing, the icon model and promotion rules live in
+  `explorer_core::tray` and `tray_promotion` (unit-tested, including
+  truncated input).
+- `explorer-win::tray` hosts a `Shell_TrayWnd` window. Icons promoted in
+  Windows' own settings (`NotifyIconSettings`) sit on the bar; the others are
+  behind a `^` overflow flyout (`tray.show_all` shows all). Clicks are
+  forwarded to the owning application using the documented
+  `NOTIFYICON_VERSION_4` or legacy callback semantics.
 - **Dev mode:** our invisible `Shell_TrayWnd` is kept first in Z order, so
   `Shell_NotifyIcon`'s `FindWindow` reaches us. Every message is forwarded
   to explorer's real tray window, so explorer keeps working. At start-up we
@@ -122,23 +176,31 @@ premultiplied BGRA). Each render target caches its own GPU copy.
   with `tray.intercept_in_dev_mode = false`.
 - **Shell mode:** we are the only tray. AppBar traffic (`dwData == 0`) is
   not served yet.
+- **Quick settings** (volume/mute/device via WASAPI, brightness via WMI,
+  network via NLM, battery) and the **calendar** flyout open from the system
+  glyphs and the clock. The back-ends live in `explorer-win` and are always
+  built.
 
 ## Start menu (launcher)
 
-The launcher is a Windows 11-style Start menu, anchored above the taskbar
-(centred or left, following the alignment). It has three views:
+`explorer-rs-launcher` is a Windows 11-style Start menu anchored above the
+taskbar (centred or left, following the alignment); it is not just a search
+box. Views: Home (pinned grid with pages, Recommended = recent files and
+frequently used apps, footer with account, File Explorer, Settings and power
+menu), All apps, and sectioned Search (Best match, Apps, Settings, Documents,
+Commands, calculator, run commands) with a detail panel. The UI is bilingual
+(English/Spanish). User-facing details: [START-MENU.md](START-MENU.md).
 
-| View | Contents |
-|---|---|
-| Home | Search box; pinned apps grid (6×3); "Most used" (frecency); footer with user name and power menu (lock, sign out, sleep, shut down, restart) |
-| All apps | Alphabetical list with letter headers |
-| Search | Any typing switches here |
+Pins are stored in `%LOCALAPPDATA%\explorer-rs\pins.toml`, seeded once with
+common apps that exist on the machine. Taskbar pins are separate
+(`taskbar-pins.toml`).
 
-Pins are stored in `%LOCALAPPDATA%\explorer-rs\pins.toml`. They are
-seeded once with common apps that exist on the machine (Edge, File Explorer,
-Settings, Store, Terminal, Notepad, Calculator, Photos…), after which the
-user's own choices are kept. Right-clicking an app offers Pin/Unpin, Move
-to front, Run as administrator and Open file location.
+Decisions live in `explorer-core` (`settings_pages`, `calc`, `run_command`,
+`recent`, `results`) and the portable `model.rs`; the Windows layer
+(`app.rs`, `sys.rs`, `worker.rs`, `cue.rs`) only draws rows and runs actions.
+Background work: indexer thread (apps + icons), `start-aux` (program
+resolution, recent files, avatar, optional tools), `start-icons` (on-demand
+icons), file-results worker.
 
 ### Launcher internals
 
@@ -169,8 +231,11 @@ to front, Run as administrator and Open file location.
 | What | Where |
 |---|---|
 | Config | `%APPDATA%\explorer-rs\config.toml` (documented default: `config/default.toml`, embedded and tested to equal `Config::default()`) |
-| Logs | `%LOCALAPPDATA%\explorer-rs\logs\<component>.YYYY-MM-DD.log`, daily rotation, 7 files kept |
+| Logs | `%LOCALAPPDATA%\explorer-rs\logs\<component>.YYYY-MM-DD.log` (`guardian`, `supervisor`, `taskbar`, ...), daily rotation, 7 files kept |
 | Launch history | `%LOCALAPPDATA%\explorer-rs\launch-history.toml` |
+| Pins | `%LOCALAPPDATA%\explorer-rs\pins.toml` (Start), `taskbar-pins.toml` (taskbar) |
+| Guardian state | `%LOCALAPPDATA%\explorer-rs\state\crashlog.toml` |
+| Installer log | `%ProgramData%\explorer-rs\setup.log` |
 | Override | `EXPLORER_RS_HOME` puts everything under one folder; `EXPLORER_RS_LOG` sets the tracing filter |
 
 A broken config never prevents startup: defaults are used and the error is
@@ -178,23 +243,33 @@ logged. Unknown keys are rejected, so typos are reported instead of being
 ignored. Panics are logged with a backtrace by a panic hook before the
 process dies.
 
+## Desktop and shell mode
+
+`explorer-rs-desktop` draws the wallpaper behind all windows (Progman,
+`SetShellWindow`), following the Windows background settings. In shell mode
+the supervisor side also signals the "shell ready" events and runs the
+startup apps (Run/RunOnce keys, Startup folder, honouring StartupApproved).
+There are no desktop icons. Details and limits: [SHELL-MODE.md](SHELL-MODE.md).
+
 ## File index
 
 `explorer-rs-indexd` keeps an Everything-style in-memory file-name index
 (NTFS MFT + USN journal through a minimal elevated helper, or folder walking +
 `ReadDirectoryChangesW`), persists it in checksummed snapshots and serves
-queries over a per-user named pipe. It is a known supervisor component
-(`indexd`) but not enabled by default. Details: [INDEX.md](INDEX.md),
+queries over a per-user named pipe. The helper runs elevated through the
+`\explorer-rs\IndexHelper` scheduled task created by the installer. `indexd`
+is a supervisor component enabled by the installer's "Fast file search"
+option (`supervisor.file_search`). Details: [INDEX.md](INDEX.md),
 [IPC-PROTOCOL.md](IPC-PROTOCOL.md), ADRs 0010-0012.
 
 ## Feature flags
 
-The tray is no longer a feature flag; it is controlled by the `[tray]`
-config section.
+The tray and the quick-settings back-ends are always built; the `[tray]`
+config section controls the tray.
 
 | Feature | Crate(s) | State |
 |---|---|---|
-| `quick-settings` | explorer-win, explorer-taskbar | battery, volume and connectivity back-ends implemented; no UI yet |
+| `quick-settings` | explorer-win, explorer-taskbar | no-op, kept for old build scripts (back-ends are always built) |
 | `virtual-desktops` | explorer-win, explorer-taskbar | thin `winvd` wrapper (undocumented COM); no UI yet |
 | `everything` | explorer-launcher | implemented, dynamic DLL load |
 | `file-index` | explorer-launcher | "Files" results from `explorer-rs-indexd`; wins over `everything` if both are on |
@@ -205,6 +280,8 @@ config section.
   --all-targets -- -D warnings`, `cargo test --workspace`.
 - Windows cross-check: `cargo xwin clippy --target x86_64-pc-windows-msvc
   --workspace --all-targets --all-features -- -D warnings`.
+- Installer: `explorer-rs-setup-<version>-x64.exe` is packed by the pipeline
+  in [PACKAGING.md](PACKAGING.md) (`explorer-setup-pack`).
 - Release zip: `scripts/build-windows.sh` produces
   `dist/explorer-rs-<version>-x86_64-pc-windows-msvc.zip`. Set
   `FEATURES=all` or `FEATURES="everything"` to include optional features, or

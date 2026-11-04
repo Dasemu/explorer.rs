@@ -142,65 +142,6 @@ recent files, the account picture, optional-tool checks and icons run on
 two worker threads (`start-aux`, `start-icons`); file results on the
 `files.rs` worker. Stale answers are dropped by query generation.
 
-## For the lead: STATUS / TESTING / ARCHITECTURE entries
+## For the lead
 
-### STATUS rows (all unverified on Windows)
-
-| State | Item |
-|---|---|
-| Implemented, unverified on Windows | Start menu bilingual UI (English/Spanish) and search placeholder (EDIT subclass) |
-| Implemented, unverified on Windows | Sectioned search (Best match, Apps, Settings, Documents, Commands) with detail panel actions |
-| Implemented, unverified on Windows | Settings pages and system tools search (`ms-settings:`, `.msc`, Terminal only if installed) |
-| Implemented, unverified on Windows | Calculator in search, Enter copies (CF_UNICODETEXT) |
-| Implemented, unverified on Windows | Run commands (`>cmd`, paths, programs via App Paths/SearchPathW), never URLs |
-| Implemented, unverified on Windows | Recommended: recent files via IShellLinkW, honours Start_TrackDocs; frequently used apps |
-| Implemented, unverified on Windows | Pinned pages (>18 pins), Pin to taskbar, Uninstall, Remove from list, Move to front |
-| Implemented, unverified on Windows | Footer: account picture, File Explorer, Settings, "…" (restart Start menu), power menu with GetPwrCapabilities |
-| Implemented, unverified on Windows | Keyboard focus zones, focus ring, Esc semantics, context-menu key |
-
-### ARCHITECTURE
-
-The launcher keeps decisions in `explorer-core` (`settings_pages`, `calc`,
-`run_command`, `recent`, `results`) and in its portable `model.rs`; the
-Windows layer (`app.rs`, `sys.rs`, `worker.rs`, `cue.rs`) only draws rows
-and runs actions. Background work: indexer thread (apps + icons),
-`start-aux` (program resolution, recent files, avatar, optional tools),
-`start-icons` (on-demand icons), file-results worker.
-
-### TESTING steps (Windows 11, Spanish UI)
-
-1. Press Win: Start opens instantly above the taskbar with the placeholder
-   "Buscar aplicaciones, configuración y documentos"; headers read
-   "Anclado", "Todas las aplicaciones", "Recomendado".
-2. Pin more than 18 apps (All apps → right-click → Anclar a Inicio): page
-   dots appear right of the grid; wheel, dots and PgDn change pages.
-3. Open a few documents in Notepad/Word, reopen Start: they appear under
-   "Recomendado" with "Hoy HH:MM". Turn off Settings → Personalization →
-   Start → "Show recently opened items": reopen Start, files disappear.
-   Right-click a recent file → "Quitar de la lista".
-4. Type `blo`: "Bloc de notas" is the Best match; the right panel shows
-   Abrir, Abrir ubicación del archivo (classic apps), Anclar a Inicio,
-   Anclar a la barra de tareas, Desinstalar. Choose "Anclar a la barra de
-   tareas": the taskbar shows the pin within a few seconds.
-5. Type `pantalla`, `wifi`, `bluetooth`, `fondo de pantalla`,
-   `administrador de dispositivos`, `regedit`: the right Settings page /
-   tool opens with Enter.
-6. Type `6*7` → "= 42"; `1/4` → "= 0,25"; Enter shows "Copiado" and the
-   clipboard holds `0,25`. Type `14:30`, `2024`: no calculator row.
-7. Type `>ipconfig` → Enter opens a Command Prompt running ipconfig. Type
-   `%APPDATA%`, `C:\Windows`, `notepad C:\Windows\win.ini`: each opens.
-   Type `https://example.com`, `www.example.com`, `msedge https://x`: no
-   Run row. Ctrl+Shift+Enter on `cmd` shows a UAC prompt.
-8. Keyboard only: Tab from the search box through results, detail actions
-   (one by one), footer buttons, back to the search box; arrows inside
-   grids/lists; Esc clears the query, then returns Home, then closes. The
-   focus ring is visible after keyboard moves.
-9. Footer: account picture shown (or a person glyph); File Explorer and
-   Settings buttons open; power menu hides "Suspender" / "Hibernar" when not
-   supported; "…" → "Reiniciar el menú Inicio" restarts the launcher (under
-   the supervisor).
-10. With `--features file-index` and the daemon running, type part of a
-    file name: "Documentos" shows files with icons and folders; actions
-    Abrir / Abrir ubicación del archivo / Copiar ruta de acceso work.
-11. Switch Windows to English (or `[general] language = "en"`): all strings
-    are English.
+Merged into ARCHITECTURE.md, STATUS.md and TESTING-ON-WINDOWS.md.
