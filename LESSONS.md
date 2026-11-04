@@ -112,3 +112,18 @@ Non-obvious findings. Add an entry whenever something surprises you.
 - **`MA_NOACTIVATE` on the bar makes flyout toggling simple**: clicking the
   opener does not deactivate the open flyout, so the click can close it;
   the deactivation debounce is only a safety net.
+
+## Recovery and shell mode (guardian, desktop)
+
+- **Message-only windows miss session end.** `WM_QUERYENDSESSION` /
+  `WM_ENDSESSION` are only sent to top-level windows; a hidden `WS_POPUP`
+  window is needed next to the message-only hotkey window.
+- **Once-per-session guards must outlive the process that does the work.** A
+  named event is destroyed with its last handle, so the guardian keeps a
+  handle open for the whole sign-in; the supervisor claims the event before
+  doing the work so a crash mid-way never repeats it.
+- **A pid-less "quit" in shell mode is dangerous.** If the guardian exited
+  when the user quit explorer.rs, the emergency hotkeys would go with it; in
+  shell mode it idles instead.
+- **`pkill -f <pattern>` in an agent shell can kill the shell itself** when the
+  pattern appears in its own command line; filter `ps -eo pid,comm` instead.

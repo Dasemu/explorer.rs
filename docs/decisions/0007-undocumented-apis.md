@@ -12,7 +12,10 @@ must be listed here and in STATUS.md.
 |---|---|---|
 | `IVirtualDesktopManagerInternal` & co. (via `winvd`) | virtual desktops | `virtual-desktops` |
 | `Shell_TrayWnd` `WM_COPYDATA` payload layout | tray host (planned) | `tray` |
-| `SetTaskmanWindow` / `SetShellWindow` (user32 exports) | possibly shell mode (not used yet) | — |
+| `SetTaskmanWindow` (user32 export) | possibly shell mode (not used yet) | — |
+| `SetShellWindow` (user32 export, `GetProcAddress`) | desktop window, shell mode only; failure ignored (ADR 0014) | — (mode-gated) |
+| `msgina: ShellReadyEvent`, `ShellDesktopSwitchEvent` (named events set by the shell) | supervisor, shell mode, once per sign-in; missing events ignored | — (mode-gated) |
+| `Explorer\StartupApproved\{Run,Run32,StartupFolder}` binary format | startup apps, shell mode; unknown data = enabled | — (mode-gated) |
 | `HKCU\Control Panel\NotifyIconSettings\*` registry layout (`ExecutablePath`, `UID`, `IsPromoted`) — read only | taskbar tray promotion | — (missing/changed layout = every icon in the overflow; `tray.show_all = true` bypasses) |
 
 Documented but "not intended for general use": `RegisterShellHookWindow`.

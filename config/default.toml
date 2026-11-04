@@ -89,9 +89,20 @@ restart_max_delay_ms = 30000
 crash_loop_max = 5
 crash_loop_window_s = 60
 # Components to run. Remove one to disable it. Known components:
-# "taskbar", "launcher", "indexd" (file-name index daemon; not enabled by
-# default until verified on Windows, see docs/INDEX.md).
-components = ["taskbar", "launcher"]
+# "taskbar", "launcher", "desktop" (wallpaper window, see [desktop]) and
+# "indexd" (file-name index daemon, see `file_search` and docs/INDEX.md).
+# Changes are picked up while running (the config file is re-read).
+components = ["taskbar", "launcher", "desktop"]
+# File search (the "indexd" component): "auto" follows the choice made in
+# the installer, unless `components` is set in your config file; "on" or
+# "off" force it either way.
+file_search = "auto"
+
+[desktop]
+# Wallpaper window (explorer-rs-desktop): "shell" = only when explorer.rs is
+# the Windows shell (explorer.exe draws the desktop otherwise), "always" or
+# "never". There are no desktop icons; see docs/SHELL-MODE.md.
+enabled = "shell"
 
 [index]
 # Settings of the file-name index daemon (explorer-rs-indexd).

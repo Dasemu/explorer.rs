@@ -9,9 +9,12 @@ pub mod calc;
 pub mod calendar;
 pub mod catalog;
 pub mod clock;
+pub mod components;
 pub mod config;
+pub mod crashlog;
 pub mod dump;
 pub mod flyout_layout;
+pub mod guardian;
 pub mod hotkey;
 pub mod i18n;
 pub mod image;
@@ -27,6 +30,7 @@ pub mod settings_pages;
 pub mod shellpath;
 pub mod shellreg;
 pub mod start;
+pub mod startup;
 pub mod supervisor;
 pub mod system_glyphs;
 pub mod taskbar_groups;
@@ -35,6 +39,7 @@ pub mod taskbar_model;
 pub mod theme;
 pub mod tray;
 pub mod tray_promotion;
+pub mod wallpaper;
 pub mod window_filter;
 
 /// Human-readable product name.

@@ -325,6 +325,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "explorer-desktop"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "explorer-core",
+ "explorer-win",
+ "tracing",
+]
+
+[[package]]
 name = "explorer-index"
 version = "0.1.0"
 dependencies = [
@@ -386,6 +397,7 @@ dependencies = [
  "clap",
  "explorer-core",
  "explorer-win",
+ "tempfile",
  "tracing",
 ]
 
