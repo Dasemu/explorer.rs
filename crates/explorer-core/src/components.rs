@@ -69,17 +69,30 @@ pub fn resolve(
 }
 
 /// Components that must be restarted because the parts of the config they
-/// read changed. `[general]` affects everyone (language, theme, logging).
+/// read changed:
+/// - everyone reads `[general]` (language, theme, logging);
+/// - the taskbar reads `[taskbar]`, `[tray]` and
+///   `[launcher] win_key_opens_launcher` (it owns the Win key hook);
+/// - the launcher reads `[launcher]`, `[index]` (file results) and
+///   `[taskbar]` (it opens next to the taskbar: position, alignment, height);
+/// - indexd reads `[index]`; the desktop reads `[desktop]`.
 pub fn affected_by_change(old: &Config, new: &Config) -> Vec<&'static str> {
     let general = old.general != new.general;
+    let taskbar = old.taskbar != new.taskbar;
+    let launcher = old.launcher != new.launcher;
+    let index = old.index != new.index;
     let mut out = Vec::new();
-    if general || old.taskbar != new.taskbar || old.tray != new.tray {
+    if general
+        || taskbar
+        || old.tray != new.tray
+        || old.launcher.win_key_opens_launcher != new.launcher.win_key_opens_launcher
+    {
         out.push("taskbar");
     }
-    if general || old.launcher != new.launcher || old.index != new.index {
+    if general || launcher || index || taskbar {
         out.push("launcher");
     }
-    if general || old.index != new.index {
+    if general || index {
         out.push(INDEXD);
     }
     if general || old.desktop != new.desktop {
@@ -160,7 +173,31 @@ mod tests {
         assert!(affected_by_change(&a, &a).is_empty());
         let mut b = a.clone();
         b.taskbar.height = 40;
+        // The launcher positions itself next to the taskbar.
+        assert_eq!(affected_by_change(&a, &b), ["taskbar", "launcher"]);
+        let mut b = a.clone();
+        b.taskbar.alignment = match a.taskbar.alignment {
+            crate::config::Alignment::Center => crate::config::Alignment::Left,
+            _ => crate::config::Alignment::Center,
+        };
+        assert_eq!(affected_by_change(&a, &b), ["taskbar", "launcher"]);
+        let mut b = a.clone();
+        b.tray.show_all = !a.tray.show_all;
         assert_eq!(affected_by_change(&a, &b), ["taskbar"]);
+        // The taskbar owns the Win key hook.
+        let mut b = a.clone();
+        b.launcher.win_key_opens_launcher = !a.launcher.win_key_opens_launcher;
+        assert_eq!(affected_by_change(&a, &b), ["taskbar", "launcher"]);
+        // Other launcher settings only affect the launcher.
+        let mut b = a.clone();
+        b.launcher.max_results += 1;
+        assert_eq!(affected_by_change(&a, &b), ["launcher"]);
+        let mut b = a.clone();
+        b.desktop.enabled = match a.desktop.enabled {
+            crate::config::DesktopMode::Always => crate::config::DesktopMode::Never,
+            _ => crate::config::DesktopMode::Always,
+        };
+        assert_eq!(affected_by_change(&a, &b), ["desktop"]);
         let mut b = a.clone();
         b.index.launcher_results = 3;
         assert_eq!(affected_by_change(&a, &b), ["launcher", "indexd"]);
