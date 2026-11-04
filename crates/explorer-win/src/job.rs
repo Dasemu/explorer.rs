@@ -3,6 +3,19 @@
 //!
 //! Without this, closing the supervisor's console in dev mode would leave
 //! orphaned taskbars reserving screen space.
+//!
+//! Only the components themselves belong to the job: the supervisor assigns
+//! each one explicitly with [`KillOnCloseJob::assign`]. The job is created
+//! with `JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK`, so every process a
+//! component starts (an app launched from the Start menu, the taskbar, the
+//! desktop menu, a tray icon) is NOT added to the job and survives when
+//! explorer.rs restarts or quits. Without that flag, `KILL_ON_JOB_CLOSE`
+//! would kill all the user's apps together with explorer.rs.
+//!
+//! Startup apps are launched by the supervisor process itself, which is
+//! never a member of its own job, so they are not in it either (no
+//! `CREATE_BREAKAWAY_FROM_JOB` needed; that flag would even make the launch
+//! fail when an outer job, e.g. Task Scheduler's, forbids breakaway).
 
 use std::os::windows::io::AsRawHandle;
 
@@ -11,7 +24,7 @@ use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
     SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
 };
 
 pub struct KillOnCloseJob(HANDLE);
@@ -25,7 +38,10 @@ impl KillOnCloseJob {
         unsafe {
             let job = CreateJobObjectW(None, None).context("CreateJobObjectW")?;
             let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // Children of components break away silently: only processes
+            // assigned explicitly are members (see the module docs).
+            info.BasicLimitInformation.LimitFlags =
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
             SetInformationJobObject(
                 job,
                 JobObjectExtendedLimitInformation,

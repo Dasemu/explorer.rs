@@ -159,3 +159,11 @@ Non-obvious findings. Add an entry whenever something surprises you.
 - **schtasks /XML** is most reliable with a UTF-16 LE + BOM file; Task
   Scheduler runs actions at priority 7 (below normal) unless `<Priority>` says
   otherwise, and kills them after 72 h unless `ExecutionTimeLimit` is `PT0S`.
+- **A KILL_ON_JOB_CLOSE job captures grandchildren too.** Every process a
+  job member starts joins the job by default, so the supervisor's job killed
+  every app launched from the Start menu, the taskbar or the desktop when
+  explorer.rs restarted or quit. Set `JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK`
+  and assign the components explicitly: they stay members, their children
+  do not. Startup apps are started by the supervisor, which is not a member
+  of its own job, so they need no `CREATE_BREAKAWAY_FROM_JOB` (which fails
+  when an outer job forbids breakaway).
