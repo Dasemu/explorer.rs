@@ -94,3 +94,13 @@ Non-obvious findings. Add an entry whenever something surprises you.
 - **cargo-fuzz inside a nested checkout** (git worktree below the main repo)
   picks up the parent directory's workspace; `fuzz/Cargo.toml` needs its own
   `[workspace]` table.
+
+## Taskbar flyouts
+
+- **Never `DestroyWindow` a window from inside its own handler** with the
+  `RefCell` handler model: the nested `WM_NCDESTROY` frees the slot while the
+  outer borrow is alive. The taskbar reuses one hidden flyout window and keeps
+  its state in shared data instead.
+- **`MA_NOACTIVATE` on the bar makes flyout toggling simple**: clicking the
+  opener does not deactivate the open flyout, so the click can close it;
+  the deactivation debounce is only a safety net.
