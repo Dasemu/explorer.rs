@@ -33,13 +33,12 @@ use explorer_win::windows::Win32::Graphics::Gdi::{
 };
 use explorer_win::windows::Win32::UI::Shell::ShellExecuteW;
 use explorer_win::windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, SetForegroundWindow, SetWindowPos,
-    ShowWindow, TrackPopupMenu, HWND_BOTTOM, MA_NOACTIVATE, MF_SEPARATOR, MF_STRING,
-    SPI_SETDESKWALLPAPER, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOWPOS, WM_CONTEXTMENU, WM_CREATE, WM_DESTROY,
-    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_MOUSEACTIVATE, WM_PAINT, WM_SETTINGCHANGE,
-    WM_SIZE, WM_SYSCOLORCHANGE, WM_WINDOWPOSCHANGING, WS_CLIPCHILDREN, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_POPUP,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, SetWindowPos, ShowWindow, HWND_BOTTOM,
+    MA_NOACTIVATE, MF_SEPARATOR, MF_STRING, SPI_SETDESKWALLPAPER, SWP_NOACTIVATE, SWP_NOZORDER,
+    SW_SHOWNOACTIVATE, SW_SHOWNORMAL, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOWPOS, WM_CLOSE,
+    WM_CONTEXTMENU, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND,
+    WM_MOUSEACTIVATE, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_WINDOWPOSCHANGING,
+    WS_CLIPCHILDREN, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use crate::Args;
@@ -320,18 +319,10 @@ impl Desktop {
                     let _ = AppendMenuW(menu, MF_STRING, id, w.pcwstr());
                 }
             }
-            let _ = SetForegroundWindow(self.hwnd);
-            let r = TrackPopupMenu(
-                menu,
-                TPM_RETURNCMD | TPM_RIGHTBUTTON,
-                x,
-                y,
-                None,
-                self.hwnd,
-                None,
-            );
+            let r =
+                window::track_popup_menu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, self.hwnd);
             let _ = DestroyMenu(menu);
-            r.0 as usize
+            r as usize
         };
         match cmd {
             CMD_PERSONALIZE => open_uri("ms-settings:personalization-background"),
@@ -427,8 +418,11 @@ impl Handler for Desktop {
                 self.context_menu(lparam);
                 Some(LRESULT(0))
             }
+            // The desktop is never closed by other programs (Alt+F4 on the
+            // desktop, stray WM_CLOSE); only the shutdown message stops it.
+            WM_CLOSE => Some(LRESULT(0)),
             WM_DESTROY => {
-                window::quit(0);
+                window::quit_unexpected();
                 None
             }
             _ => None,
@@ -460,6 +454,7 @@ pub fn run(args: Args) -> i32 {
         return 0;
     };
     tracing::info!(mode = mode.as_str(), "desktop starting");
+    window::init_component();
     explorer_win::dpi::enable_per_monitor_v2();
     let _com = ComApartment::sta();
 
@@ -517,5 +512,8 @@ pub fn run(args: Args) -> i32 {
     if shell {
         explorer_win::desktop::set_shell_window(hwnd);
     }
-    window::run_message_loop(|_| false)
+    let loop_code = window::run_message_loop(|_| false);
+    let code = window::exit_code();
+    tracing::info!(code, loop_code, "desktop exiting");
+    code
 }

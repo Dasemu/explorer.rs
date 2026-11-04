@@ -32,7 +32,7 @@ use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, FindWindowExW, FindWindowW, PostMessageW, SendMessageTimeoutW,
     SendNotifyMessageW, SetWindowPos, HICON, HWND_BROADCAST, HWND_TOPMOST, SMTO_ABORTIFHUNG,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WM_APP, WM_COMMAND, WM_COPYDATA, WM_USER,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WM_APP, WM_CLOSE, WM_COMMAND, WM_COPYDATA, WM_USER,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
@@ -159,6 +159,11 @@ impl TrayWindow {
 
 impl Handler for TrayWindow {
     fn handle(&mut self, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
+        if msg == WM_CLOSE {
+            // Never let another program close the tray host (it would lose
+            // every icon); the taskbar owns its lifetime.
+            return Some(LRESULT(0));
+        }
         if msg == WM_COPYDATA {
             // SAFETY: for WM_COPYDATA, lParam points to a COPYDATASTRUCT
             // valid for the duration of the message.

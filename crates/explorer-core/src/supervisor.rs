@@ -22,6 +22,14 @@ pub const EXIT_SHUTDOWN_ALL: i32 = 77;
 /// Component asks to be restarted immediately (e.g. after config change).
 pub const EXIT_RESTART: i32 = 78;
 
+/// Exit code of a component whose message loop ended. `intentional` is the
+/// code set by a deliberate stop/quit path (quit menu, restart request,
+/// graceful shutdown message). Anything else (main window destroyed by
+/// someone, a stray `WM_QUIT`) is unexpected and asks for a restart.
+pub fn component_exit_code(intentional: Option<i32>) -> i32 {
+    intentional.unwrap_or(EXIT_RESTART)
+}
+
 /// A component that ran at least this long is considered healthy: its
 /// backoff is reset.
 pub const HEALTHY_UPTIME_MS: u64 = 60_000;
@@ -93,6 +101,17 @@ impl RestartTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn component_exit_codes() {
+        assert_eq!(component_exit_code(Some(EXIT_STOP)), EXIT_STOP);
+        assert_eq!(
+            component_exit_code(Some(EXIT_SHUTDOWN_ALL)),
+            EXIT_SHUTDOWN_ALL
+        );
+        // Not deliberate: the supervisor restarts the component.
+        assert_eq!(component_exit_code(None), EXIT_RESTART);
+    }
 
     fn tracker() -> RestartTracker {
         RestartTracker::new(&SupervisorConfig {

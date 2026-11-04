@@ -54,7 +54,7 @@ use explorer_win::windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPAR
 use explorer_win::windows::Win32::Graphics::Gdi::InvalidateRect;
 use explorer_win::windows::Win32::UI::WindowsAndMessaging::{
     DestroyWindow, KillTimer, PostMessageW, SetTimer, ShowWindowAsync, SW_MINIMIZE, SW_RESTORE,
-    WM_APP, WM_DESTROY, WM_DISPLAYCHANGE, WM_POWERBROADCAST, WM_SETTINGCHANGE, WM_TIMER,
+    WM_APP, WM_CLOSE, WM_DESTROY, WM_DISPLAYCHANGE, WM_POWERBROADCAST, WM_SETTINGCHANGE, WM_TIMER,
     WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
@@ -630,6 +630,7 @@ pub fn run(args: Args) -> i32 {
         return 0;
     };
 
+    window::init_component();
     let mode = RunMode::from_env();
     tracing::info!(mode = mode.as_str(), "taskbar starting");
     let gfx = match Gfx::new() {
@@ -710,11 +711,12 @@ pub fn run(args: Args) -> i32 {
     // SAFETY: posting to our own window.
     let _ = unsafe { PostMessageW(Some(controller), WM_APP_INIT, WPARAM(0), LPARAM(0)) };
 
-    let code = window::run_message_loop(|_| false);
+    let loop_code = window::run_message_loop(|_| false);
     // Release thumbnails and the tray (and its window) before COM goes away.
     shared.flyout.borrow_mut().take();
     shared.tray.borrow_mut().take();
-    tracing::info!(code, "taskbar exiting");
+    let code = window::exit_code();
+    tracing::info!(code, loop_code, "taskbar exiting");
     code
 }
 
@@ -1078,10 +1080,13 @@ impl Handler for Controller {
                 unsafe { SetTimer(Some(hwnd), TIMER_REBUILD, 750, None) };
                 Some(LRESULT(0))
             }
+            // Only the graceful shutdown message or the quit menu end the
+            // taskbar; a WM_CLOSE from another program is ignored.
+            WM_CLOSE => Some(LRESULT(0)),
             WM_DESTROY => {
                 self.winkey = None;
                 self.hooks = None;
-                window::quit(0);
+                window::quit_unexpected();
                 Some(LRESULT(0))
             }
             _ => None,

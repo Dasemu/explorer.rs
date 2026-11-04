@@ -36,13 +36,12 @@ use explorer_win::windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use explorer_win::windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, GetClientRect, GetCursorPos, GetWindowRect,
-    KillTimer, PostMessageW, SetTimer, SetWindowPos, TrackPopupMenu, HWND_NOTOPMOST, HWND_TOPMOST,
-    MA_NOACTIVATE, MF_GRAYED, MF_SEPARATOR, MF_STRING, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_SHOWWINDOW, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_ACTIVATE, WM_APP,
-    WM_CAPTURECHANGED, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
-    WM_RBUTTONUP, WM_SIZE, WM_TIMER, WM_WINDOWPOSCHANGED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP,
+    KillTimer, PostMessageW, SetTimer, SetWindowPos, HWND_NOTOPMOST, HWND_TOPMOST, MA_NOACTIVATE,
+    MF_GRAYED, MF_SEPARATOR, MF_STRING, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CLOSE,
+    WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_SIZE,
+    WM_TIMER, WM_WINDOWPOSCHANGED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::app::Shared;
@@ -1199,17 +1198,15 @@ fn popup_menu(owner: HWND, items: &[(u32, String)]) -> u32 {
         }
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
-        let r = TrackPopupMenu(
+        let r = window::track_popup_menu(
             menu,
             TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
             pt.x,
             pt.y,
-            None,
             owner,
-            None,
         );
         let _ = DestroyMenu(menu);
-        r.0 as u32
+        r
     }
 }
 
@@ -1377,6 +1374,9 @@ impl Handler for Bar {
                 self.on_wheel(hwnd, wparam, lparam);
                 Some(LRESULT(0))
             }
+            // A bar is only destroyed by the taskbar itself (monitor
+            // changes); ignore WM_CLOSE from other programs.
+            WM_CLOSE => Some(LRESULT(0)),
             WM_DESTROY => {
                 self.tooltip = None;
                 if let Some(mut ab) = self.appbar.take() {

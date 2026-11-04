@@ -75,9 +75,9 @@ use explorer_win::windows::Win32::UI::Input::KeyboardAndMouse::{
 use explorer_win::windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DestroyMenu, GetClientRect, GetCursorPos,
     GetWindowTextLengthW, GetWindowTextW, KillTimer, MoveWindow, PostMessageW, SendMessageW,
-    SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, TrackPopupMenu, ES_AUTOHSCROLL, HMENU,
-    HWND_TOPMOST, MF_SEPARATOR, MF_STRING, MSG, SWP_NOACTIVATE, SW_HIDE, SW_SHOW, TPM_BOTTOMALIGN,
-    TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_STYLE, WM_ACTIVATE, WM_APP,
+    SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, ES_AUTOHSCROLL, HMENU, HWND_TOPMOST,
+    MF_SEPARATOR, MF_STRING, MSG, SWP_NOACTIVATE, SW_HIDE, SW_SHOW, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
+    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_STYLE, WM_ACTIVATE, WM_APP, WM_CLOSE,
     WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN,
     WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP,
     WM_SETFONT, WM_SETTINGCHANGE, WM_SIZE, WM_TIMER, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
@@ -284,6 +284,7 @@ pub fn run(args: Args) -> i32 {
         tracing::warn!("another launcher is already running; exiting");
         return 0;
     };
+    window::init_component();
     let mode = RunMode::from_env();
     tracing::info!(mode = mode.as_str(), "launcher starting");
 
@@ -421,7 +422,9 @@ pub fn run(args: Args) -> i32 {
         }
         false
     });
-    tracing::info!(code, "launcher exiting");
+    let loop_code = code;
+    let code = window::exit_code();
+    tracing::info!(code, loop_code, "launcher exiting");
     code
 }
 
@@ -621,9 +624,9 @@ fn popup_menu(owner: HWND, items: &[(u32, String)], at: MenuAt) -> u32 {
                 flags |= TPM_LEFTALIGN | TPM_BOTTOMALIGN;
             }
         }
-        let r = TrackPopupMenu(menu, flags, pt.x, pt.y, None, owner, None);
+        let r = window::track_popup_menu(menu, flags, pt.x, pt.y, owner);
         let _ = DestroyMenu(menu);
-        r.0 as u32
+        r
     }
 }
 
@@ -3014,6 +3017,12 @@ impl Handler for Launcher {
                 self.paint(hwnd);
                 Some(LRESULT(0))
             }
+            // Alt+F4 or a WM_CLOSE from another program only hides the
+            // Start menu; the window lives as long as the process.
+            WM_CLOSE => {
+                self.hide(hwnd);
+                Some(LRESULT(0))
+            }
             WM_DESTROY => {
                 // SAFETY: deleting our own GDI objects.
                 unsafe {
@@ -3024,7 +3033,7 @@ impl Handler for Launcher {
                         let _ = DeleteObject(HGDIOBJ(b.0));
                     }
                 }
-                window::quit(0);
+                window::quit_unexpected();
                 Some(LRESULT(0))
             }
             _ => None,
