@@ -102,3 +102,13 @@ Non-obvious findings. Add an entry whenever something surprises you.
 - **Fuzzy matching on keywords is noisy.** Matching settings keywords with
   the fuzzy scorer made "informe" find "About" (via "información"); keywords
   now only count on a word-prefix match, names stay fuzzy.
+
+## Taskbar flyouts
+
+- **Never `DestroyWindow` a window from inside its own handler** with the
+  `RefCell` handler model: the nested `WM_NCDESTROY` frees the slot while the
+  outer borrow is alive. The taskbar reuses one hidden flyout window and keeps
+  its state in shared data instead.
+- **`MA_NOACTIVATE` on the bar makes flyout toggling simple**: clicking the
+  opener does not deactivate the open flyout, so the click can close it;
+  the deactivation debounce is only a safety net.

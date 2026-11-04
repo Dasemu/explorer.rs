@@ -99,6 +99,16 @@ pub enum MonitorSelection {
     Primary,
 }
 
+/// Windows 11 "Combine taskbar buttons and hide labels".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Combine {
+    /// One button per app; several windows open the window picker.
+    Always,
+    /// One button per window.
+    Never,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TaskbarConfig {
@@ -114,6 +124,7 @@ pub struct TaskbarConfig {
     pub date_format: String,
     pub exclude_classes: Vec<String>,
     pub exclude_processes: Vec<String>,
+    pub combine: Combine,
 }
 
 impl Default for TaskbarConfig {
@@ -131,6 +142,7 @@ impl Default for TaskbarConfig {
             date_format: "%d/%m/%Y".into(),
             exclude_classes: Vec::new(),
             exclude_processes: Vec::new(),
+            combine: Combine::Always,
         }
     }
 }
@@ -140,6 +152,7 @@ impl Default for TaskbarConfig {
 pub struct TrayConfig {
     pub enabled: bool,
     pub intercept_in_dev_mode: bool,
+    pub show_all: bool,
 }
 
 impl Default for TrayConfig {
@@ -147,6 +160,7 @@ impl Default for TrayConfig {
         Self {
             enabled: true,
             intercept_in_dev_mode: true,
+            show_all: false,
         }
     }
 }

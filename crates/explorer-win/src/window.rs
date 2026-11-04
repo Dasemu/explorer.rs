@@ -128,11 +128,18 @@ unsafe extern "system" fn wnd_proc(
         }
         if msg == WM_NCDESTROY {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            // If the handler is currently borrowed, the window is being
+            // destroyed from inside its own handler (DestroyWindow called
+            // in `handle`). Freeing the slot now would pull it out from
+            // under that live borrow, so leak it instead: a small, bounded
+            // leak is far better than a use-after-free.
+            let can_free = (*ptr).try_borrow_mut().is_ok();
+            if !can_free {
+                tracing::warn!("window destroyed from inside its own handler; leaking its state");
+                return DefWindowProcW(hwnd, msg, wparam, lparam);
+            }
             let slot = Box::from_raw(ptr);
-            let r = match slot.try_borrow_mut() {
-                Ok(mut h) => h.handle(hwnd, msg, wparam, lparam),
-                Err(_) => None,
-            };
+            let r = slot.borrow_mut().handle(hwnd, msg, wparam, lparam);
             drop(slot);
             return r.unwrap_or_else(|| DefWindowProcW(hwnd, msg, wparam, lparam));
         }

@@ -13,6 +13,7 @@ must be listed here and in STATUS.md.
 | `IVirtualDesktopManagerInternal` & co. (via `winvd`) | virtual desktops | `virtual-desktops` |
 | `Shell_TrayWnd` `WM_COPYDATA` payload layout | tray host (planned) | `tray` |
 | `SetTaskmanWindow` / `SetShellWindow` (user32 exports) | possibly shell mode (not used yet) | — |
+| `HKCU\Control Panel\NotifyIconSettings\*` registry layout (`ExecutablePath`, `UID`, `IsPromoted`) — read only | taskbar tray promotion | — (missing/changed layout = every icon in the overflow; `tray.show_all = true` bypasses) |
 
 Documented but "not intended for general use": `RegisterShellHookWindow`.
 It is used unconditionally because the WinEvent hooks provide an independent
