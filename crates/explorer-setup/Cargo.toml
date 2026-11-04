@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "explorer-setup"
+description = "explorer.rs installer and uninstaller (explorer-rs-setup.exe), settings helper and payload packer."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+# The installer. Its payload is embedded at build time from
+# $EXPLORER_RS_PAYLOAD (see build.rs and docs/PACKAGING.md).
+[[bin]]
+name = "explorer-rs-setup"
+path = "src/main.rs"
+
+# Unelevated helper behind the "explorer.rs settings" Start menu shortcut.
+[[bin]]
+name = "explorer-rs-settings"
+path = "src/bin/settings.rs"
+
+# Host tool used by scripts/build-windows.sh to build the payload.
+[[bin]]
+name = "explorer-setup-pack"
+path = "src/bin/pack.rs"
+
+[dependencies]
+explorer-core.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+sha2.workspace = true
+miniz_oxide.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+explorer-win.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

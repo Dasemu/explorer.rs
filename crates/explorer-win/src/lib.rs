@@ -31,11 +31,15 @@ pub mod monitors;
 #[cfg(windows)]
 pub mod pipe;
 #[cfg(windows)]
+pub mod sched;
+#[cfg(windows)]
 pub mod security;
 #[cfg(windows)]
 pub mod shellhook;
 #[cfg(windows)]
 pub mod shellreg;
+#[cfg(windows)]
+pub mod shortcut;
 #[cfg(windows)]
 pub mod single_instance;
 #[cfg(windows)]
