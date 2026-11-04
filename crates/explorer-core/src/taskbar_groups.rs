@@ -277,6 +277,26 @@ pub fn move_to_slot<T>(keys: &mut Vec<T>, from: usize, slot: usize) -> bool {
     true
 }
 
+/// Apply a drag of the visible pinned button `from` to insertion `slot`
+/// (both relative to `visible`, the keys of the pinned buttons on the bar)
+/// to the full pin list. Keys that are not visible (uninstalled apps) keep
+/// their positions. Returns true if the order changed.
+pub fn reorder_pins(keys: &mut [String], visible: &[String], from: usize, slot: usize) -> bool {
+    let mut order = visible.to_vec();
+    if !move_to_slot(&mut order, from, slot) {
+        return false;
+    }
+    let mut next = order.into_iter();
+    for k in keys.iter_mut() {
+        if visible.contains(k) {
+            if let Some(n) = next.next() {
+                *k = n;
+            }
+        }
+    }
+    true
+}
+
 // ---------------------------------------------------------------------------
 // Show desktop
 // ---------------------------------------------------------------------------
@@ -525,6 +545,18 @@ mod tests {
         assert!(!move_to_slot(&mut k, 9, 0));
         assert!(move_to_slot(&mut k, 1, 99));
         assert_eq!(k, vec!["a", "c", "b"]);
+    }
+
+    #[test]
+    fn reorder_keeps_hidden_pins_in_place() {
+        let mut keys: Vec<String> = ["a", "gone", "b", "c"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let visible: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        assert!(reorder_pins(&mut keys, &visible, 2, 0));
+        assert_eq!(keys, vec!["c", "gone", "a", "b"]);
+        assert!(!reorder_pins(&mut keys, &visible, 0, 1));
     }
 
     #[test]

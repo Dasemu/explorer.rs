@@ -13,7 +13,11 @@ pub mod activate;
 #[cfg(windows)]
 pub mod appbar;
 #[cfg(windows)]
+pub mod appident;
+#[cfg(windows)]
 pub mod apps;
+#[cfg(windows)]
+pub mod brightness;
 #[cfg(windows)]
 pub mod dpi;
 #[cfg(windows)]
@@ -41,6 +45,8 @@ pub mod single_instance;
 #[cfg(windows)]
 pub mod theme;
 #[cfg(windows)]
+pub mod thumbnails;
+#[cfg(windows)]
 pub mod time;
 #[cfg(windows)]
 pub mod tooltip;
@@ -53,7 +59,7 @@ pub mod winlist;
 
 #[cfg(windows)]
 pub mod console;
-#[cfg(all(windows, feature = "quick-settings"))]
+#[cfg(windows)]
 pub mod quick_settings;
 #[cfg(windows)]
 pub mod tray;

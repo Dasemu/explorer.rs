@@ -23,6 +23,7 @@ pub mod shellpath;
 pub mod shellreg;
 pub mod start;
 pub mod supervisor;
+pub mod system_glyphs;
 pub mod taskbar_groups;
 pub mod taskbar_layout;
 pub mod taskbar_model;
