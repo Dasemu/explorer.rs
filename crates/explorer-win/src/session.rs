@@ -253,3 +253,28 @@ pub fn mutex_exists(name: &str) -> bool {
         Err(_) => false,
     }
 }
+
+/// Ask the running guardian to restart all components (same as
+/// Ctrl+Alt+Shift+R). Returns false if no guardian window was found.
+pub fn request_restart_all() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, PostMessageW};
+    let class = WideString::new("ExplorerRs.Hotkeys");
+    // SAFETY: valid class name; posting never blocks.
+    unsafe {
+        match FindWindowExW(
+            Some(HWND_MESSAGE),
+            None,
+            class.pcwstr(),
+            windows::core::PCWSTR::null(),
+        ) {
+            Ok(h) if !h.is_invalid() => PostMessageW(
+                Some(h),
+                WM_HOTKEY,
+                WPARAM(HOTKEY_RESTART as usize),
+                LPARAM(0),
+            )
+            .is_ok(),
+            _ => false,
+        }
+    }
+}

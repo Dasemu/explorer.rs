@@ -63,6 +63,10 @@ pub struct Args {
     /// Notepad.
     #[arg(long, conflicts_with_all = ["dev", "shell", "supervise", "status"])]
     pub edit_config: bool,
+    /// Ask the running explorer.rs to restart all its components (same as
+    /// Ctrl+Alt+Shift+R).
+    #[arg(long, conflicts_with_all = ["dev", "shell", "supervise", "restore_explorer", "edit_config", "status"])]
+    pub restart: bool,
     /// Print a diagnostics report (version, mode, components, shell
     /// registration, config validity, recent crash-log events).
     #[arg(long, conflicts_with_all = ["dev", "shell", "supervise"])]
@@ -81,6 +85,9 @@ fn main() {
     let args = Args::parse();
     if args.restore_explorer {
         std::process::exit(cli::restore_explorer(console));
+    }
+    if args.restart {
+        std::process::exit(cli::restart());
     }
     if args.edit_config {
         std::process::exit(cli::edit_config(args.config.as_deref()));
@@ -126,6 +133,8 @@ mod tests {
         assert!(Args::try_parse_from(["explorer-rs", "--status", "--output", "x.txt"]).is_ok());
         assert!(Args::try_parse_from(["explorer-rs", "--output", "x.txt"]).is_err());
         assert!(Args::try_parse_from(["explorer-rs", "--edit-config", "--status"]).is_err());
+        assert!(Args::try_parse_from(["explorer-rs", "--restart"]).is_ok());
+        assert!(Args::try_parse_from(["explorer-rs", "--restart", "--dev"]).is_err());
         let a = Args::try_parse_from([
             "explorer-rs",
             "--supervise",

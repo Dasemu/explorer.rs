@@ -183,6 +183,24 @@ pub fn restore_explorer(console: bool) -> i32 {
     }
 }
 
+/// `--restart`: tell the running guardian to restart every component.
+pub fn restart() -> i32 {
+    #[cfg(windows)]
+    {
+        if explorer_win::session::request_restart_all() {
+            0
+        } else {
+            eprintln!("explorer.rs (guardian) is not running");
+            1
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        eprintln!("--restart only works on Windows");
+        1
+    }
+}
+
 /// `--edit-config`.
 pub fn edit_config(over: Option<&Path>) -> i32 {
     let paths = AppPaths::from_env();
