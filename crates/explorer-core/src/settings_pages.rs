@@ -5,15 +5,16 @@
 //! (Windows 11 wording) plus search keywords in both languages, so a Spanish
 //! user typing "wifi", "bluetooth" or "fondo de pantalla" and an English user
 //! typing "brightness" both land on the right page. Matching uses the same
-//! fuzzy scorer as apps ([`crate::search::Searcher::score`]): the name in the
-//! UI language scores fully, the other language's name and all keywords count
-//! as keywords.
+//! scorer as apps ([`crate::search::Searcher::score`]): the name in the UI
+//! language is matched fuzzily; the other language's name and the keywords
+//! only count when a word of them starts with the query (fuzzy keyword
+//! matches were too noisy: "informe" found "About" via "información").
 //!
 //! Settings pages are opened with `ShellExecute(ms-settings:...)`; tools are
 //! programs or snap-ins started the same way (`devmgmt.msc`, `regedit.exe`).
 
 use crate::i18n::Lang;
-use crate::search::{Query, Searcher};
+use crate::search::{match_quality, MatchQuality, Query, Searcher};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
@@ -1019,6 +1020,8 @@ pub const ENTRIES: &[SettingsEntry] = &[
 pub struct SettingsHit {
     pub index: usize,
     pub score: u32,
+    /// Name match quality; a keyword match counts as a word-prefix match.
+    pub quality: MatchQuality,
 }
 
 impl SettingsHit {
@@ -1044,9 +1047,20 @@ pub fn search(
         .enumerate()
         .filter(|(_, e)| available(e))
         .filter_map(|(index, e)| {
-            searcher
-                .score(&q, e.name(lang), e.keywords(lang))
-                .map(|score| SettingsHit { index, score })
+            let name = e.name(lang);
+            let keywords: Vec<&str> = e
+                .keywords(lang)
+                .filter(|k| match_quality(k, query) >= MatchQuality::WordPrefix)
+                .collect();
+            let mut quality = match_quality(name, query);
+            if !keywords.is_empty() && quality < MatchQuality::WordPrefix {
+                quality = MatchQuality::WordPrefix;
+            }
+            searcher.score(&q, name, keywords).map(|score| SettingsHit {
+                index,
+                score,
+                quality,
+            })
         })
         .collect();
     hits.sort_by(|a, b| {
@@ -1131,5 +1145,11 @@ mod tests {
         assert_eq!(by_id("regedit").map(|e| e.target), Some("regedit.exe"));
         assert_eq!(by_id("display").unwrap().name(Lang::Es), "Pantalla");
         assert!(by_id("nope").is_none());
+        // Keywords only match by word prefix: no fuzzy noise.
+        let hits = search(&mut s, "informe", Lang::Es, |_| true, 10);
+        assert!(hits.iter().all(|h| h.entry().id != "about"));
+        let wifi = search(&mut s, "wifi", Lang::Es, |_| true, 10);
+        assert_eq!(wifi[0].entry().id, "wifi");
+        assert!(wifi[0].quality >= MatchQuality::WordPrefix);
     }
 }

@@ -23,6 +23,8 @@ pub struct RecentFile {
     /// Display name (the target's file name).
     pub name: String,
     pub path: PathBuf,
+    /// The shortcut in the Recent folder ("Remove from list" deletes it).
+    pub shortcut: PathBuf,
     /// Last opened, Unix seconds (UTC).
     pub opened: i64,
 }
@@ -236,6 +238,7 @@ mod tests {
         let f = |p: &str, t| RecentFile {
             name: display_name(Path::new(p)),
             path: PathBuf::from(p),
+            shortcut: PathBuf::from(format!("{p}.lnk")),
             opened: t,
         };
         let d = dedupe(

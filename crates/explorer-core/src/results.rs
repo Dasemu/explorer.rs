@@ -118,8 +118,10 @@ fn limit_of(l: &Limits, s: Section) -> usize {
 /// 1. a calculator result;
 /// 2. the app/tool whose name equals or starts with the query (best
 ///    quality, then score);
-/// 3. the highest-scoring app, tool or setting;
-/// 4. a "Run" command, then a document.
+/// 3. the highest-scoring app, tool or setting with a word-prefix match;
+/// 4. a document whose name starts with the query;
+/// 5. the highest-scoring app, tool or setting (fuzzy match);
+/// 6. a "Run" command, then any document.
 fn best_index<T>(c: &[Scored<T>]) -> Option<usize> {
     let pick = |pred: &dyn Fn(&Scored<T>) -> bool| -> Option<usize> {
         c.iter()
@@ -144,6 +146,20 @@ fn best_index<T>(c: &[Scored<T>]) -> Option<usize> {
         .or_else(|| {
             pick(&|s| {
                 matches!(s.kind, ResultKind::App | ResultKind::Tool)
+                    && s.quality >= MatchQuality::Prefix
+            })
+        })
+        .or_else(|| {
+            by_score(&|s| {
+                matches!(
+                    s.kind,
+                    ResultKind::App | ResultKind::Tool | ResultKind::Setting
+                ) && s.quality >= MatchQuality::WordPrefix
+            })
+        })
+        .or_else(|| {
+            pick(&|s| {
+                matches!(s.kind, ResultKind::File | ResultKind::Folder)
                     && s.quality >= MatchQuality::Prefix
             })
         })
@@ -320,7 +336,8 @@ pub enum ZoneKind {
 
 /// A group of focusable items. Tab moves between zones (or between the
 /// items of a `tab_each` zone); arrows move inside a zone and, when
-/// `arrows_leave`, out of it into the neighbouring zone.
+/// `arrows_leave`, out of it into the neighbouring zone. A `contained`
+/// zone (`arrows_leave == false`) is reached with Tab only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Zone {
     pub kind: ZoneKind,
@@ -373,6 +390,18 @@ fn first_zone(zones: &[Zone]) -> Option<usize> {
     zones.iter().position(|z| z.len > 0)
 }
 
+/// Neighbouring zones for arrow keys: only those that take part in arrow
+/// navigation (`arrows_leave`).
+fn next_arrow_zone(zones: &[Zone], from: usize) -> Option<usize> {
+    (from + 1..zones.len()).find(|&z| zones[z].len > 0 && zones[z].arrows_leave)
+}
+
+fn prev_arrow_zone(zones: &[Zone], from: usize) -> Option<usize> {
+    (0..from)
+        .rev()
+        .find(|&z| zones[z].len > 0 && zones[z].arrows_leave)
+}
+
 /// Move focus with an arrow key.
 pub fn arrow(zones: &[Zone], cur: Focus, key: Arrow) -> Focus {
     let Some((z, i)) = cur.filter(|(z, i)| zones.get(*z).is_some_and(|zz| *i < zz.len)) else {
@@ -380,7 +409,10 @@ pub fn arrow(zones: &[Zone], cur: Focus, key: Arrow) -> Focus {
         // enters the first zone.
         return match key {
             Arrow::Up => None,
-            _ => first_zone(zones).map(|z| (z, 0)),
+            _ => zones
+                .iter()
+                .position(|z| z.len > 0 && z.arrows_leave)
+                .map(|z| (z, 0)),
         };
     };
     let zone = zones[z];
@@ -418,7 +450,7 @@ pub fn arrow(zones: &[Zone], cur: Focus, key: Arrow) -> Focus {
     match out {
         Out::Stay(n) => Some((z, n)),
         Out::Keep => Some((z, i)),
-        Out::LeaveUp if zone.arrows_leave => match prev_zone(zones, z) {
+        Out::LeaveUp if zone.arrows_leave => match prev_arrow_zone(zones, z) {
             Some(p) => {
                 let pz = zones[p];
                 let idx = match pz.kind {
@@ -429,7 +461,7 @@ pub fn arrow(zones: &[Zone], cur: Focus, key: Arrow) -> Focus {
             }
             None => None,
         },
-        Out::LeaveDown if zone.arrows_leave => match next_zone(zones, z) {
+        Out::LeaveDown if zone.arrows_leave => match next_arrow_zone(zones, z) {
             Some(n) => Some((n, 0)),
             None => Some((z, i)),
         },
@@ -528,6 +560,26 @@ mod tests {
         let r = assemble(vec![c(File, 10, Fuzzy, "f")], &Limits::default());
         assert_eq!(names(&r), vec![(Section::BestMatch, "f")]);
         assert!(assemble::<&str>(vec![], &Limits::default()).is_empty());
+    }
+
+    #[test]
+    fn document_prefix_beats_fuzzy_setting() {
+        let r = assemble(
+            vec![
+                c(Setting, 90, Fuzzy, "About"),
+                c(File, 0, Prefix, "informe.docx"),
+            ],
+            &Limits::default(),
+        );
+        assert_eq!(r[0].1.item, "informe.docx");
+        let r = assemble(
+            vec![
+                c(Setting, 90, WordPrefix, "Network"),
+                c(File, 0, Prefix, "network.txt"),
+            ],
+            &Limits::default(),
+        );
+        assert_eq!(r[0].1.item, "Network");
     }
 
     #[test]
@@ -646,7 +698,20 @@ mod tests {
         ];
         assert_eq!(arrow(&z, Some((1, 0)), Arrow::Up), Some((1, 0)));
         assert_eq!(arrow(&z, Some((1, 1)), Arrow::Down), Some((1, 1)));
-        assert_eq!(arrow(&z, Some((0, 2)), Arrow::Down), Some((1, 0)));
+        // Contained zones are not entered by arrows either (Tab only).
+        assert_eq!(arrow(&z, Some((0, 2)), Arrow::Down), Some((0, 2)));
+        let z = vec![
+            Zone::new(ZoneKind::List, 3),
+            Zone::new(ZoneKind::List, 2).contained(),
+            Zone::new(ZoneKind::Row, 2),
+        ];
+        assert_eq!(arrow(&z, Some((0, 2)), Arrow::Down), Some((2, 0)));
+        assert_eq!(arrow(&z, Some((2, 1)), Arrow::Up), Some((0, 2)));
+        let z = vec![
+            Zone::new(ZoneKind::Row, 1).contained(),
+            Zone::new(ZoneKind::List, 2),
+        ];
+        assert_eq!(arrow(&z, None, Arrow::Down), Some((1, 0)));
     }
 
     #[test]

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! `explorer-rs-launcher`: keyboard-first launcher for installed apps
-//! (Start Menu shortcuts + `shell:AppsFolder`, including packaged apps).
-//! No web results, ever.
+//! `explorer-rs-launcher`: the explorer.rs Start menu. Pinned apps,
+//! recommended files, All apps, and a keyboard-first search over apps
+//! (Start Menu shortcuts + `shell:AppsFolder`, including packaged apps),
+//! Windows Settings pages, files, commands and a calculator.
+//! No web results, ever. See docs/START-MENU.md.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
@@ -11,6 +13,10 @@ use clap::Parser;
 
 #[cfg(windows)]
 mod app;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod avatar;
+#[cfg(windows)]
+mod cue;
 #[cfg(all(windows, feature = "everything"))]
 // With both features the index back-end wins; keep Everything compiled.
 #[cfg_attr(feature = "file-index", allow(dead_code))]
@@ -19,6 +25,12 @@ mod everything;
 mod file_index;
 #[cfg(all(windows, any(feature = "everything", feature = "file-index")))]
 mod files;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod model;
+#[cfg(windows)]
+mod sys;
+#[cfg(windows)]
+mod worker;
 
 #[derive(Parser, Debug)]
 #[command(name = "explorer-rs-launcher", version, about = "explorer.rs launcher")]
