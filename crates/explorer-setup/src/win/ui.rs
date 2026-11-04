@@ -42,17 +42,18 @@ use explorer_win::windows::Win32::UI::HiDpi::{
 };
 use explorer_win::windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use explorer_win::windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, GetClientRect, GetSystemMetrics, IsDialogMessageW, LoadImageW,
-    MessageBoxW, PostMessageW, PostQuitMessage, SendMessageW, SetWindowPos, SetWindowTextW,
-    ShowWindow, BM_CLICK, BM_GETCHECK, BM_SETCHECK, BN_CLICKED, BS_AUTOCHECKBOX,
-    BS_AUTORADIOBUTTON, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, ES_AUTOHSCROLL, ES_MULTILINE, ES_READONLY,
-    HICON, HMENU, ICON_BIG, ICON_SMALL, IDNO, IMAGE_ICON, LR_DEFAULTCOLOR, MB_ICONERROR,
-    MB_ICONQUESTION, MB_OK, MB_YESNO, MESSAGEBOX_STYLE, NONCLIENTMETRICSW, SM_CXSCREEN,
-    SM_CYSCREEN, SPI_GETNONCLIENTMETRICS, STN_CLICKED, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE,
-    SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CTLCOLORBTN,
-    WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_PAINT, WM_SETFONT, WM_SETICON,
-    WS_CAPTION, WS_CHILD, WS_EX_CLIENTEDGE, WS_EX_CONTROLPARENT, WS_GROUP, WS_MINIMIZEBOX,
-    WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VSCROLL,
+    CallWindowProcW, CreateWindowExW, DestroyWindow, GetClientRect, GetSystemMetrics,
+    IsDialogMessageW, LoadImageW, MessageBoxW, PostMessageW, PostQuitMessage, SendMessageW,
+    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, BM_CLICK, BM_GETCHECK,
+    BM_SETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON, BS_DEFPUSHBUTTON, BS_PUSHBUTTON,
+    ES_AUTOHSCROLL, ES_MULTILINE, ES_READONLY, GWLP_WNDPROC, HICON, HMENU, ICON_BIG, ICON_SMALL,
+    IDNO, IMAGE_ICON, LR_DEFAULTCOLOR, MB_ICONERROR, MB_ICONQUESTION, MB_OK, MB_YESNO,
+    MESSAGEBOX_STYLE, NONCLIENTMETRICSW, SM_CXSCREEN, SM_CYSCREEN, SPI_GETNONCLIENTMETRICS,
+    STN_CLICKED, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_APP, WM_CLOSE, WM_COMMAND, WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED,
+    WM_ERASEBKGND, WM_PAINT, WM_SETFONT, WM_SETICON, WNDPROC, WS_CAPTION, WS_CHILD,
+    WS_EX_CLIENTEDGE, WS_EX_CONTROLPARENT, WS_GROUP, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
+    WS_TABSTOP, WS_VSCROLL,
 };
 
 use crate::cli::exit;
@@ -152,6 +153,7 @@ fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
     COLORREF(r as u32 | (g as u32) << 8 | (b as u32) << 16)
 }
 
+#[derive(Clone, Copy)]
 struct Colors {
     dark: bool,
     bg: COLORREF,
@@ -748,7 +750,8 @@ impl Wizard {
     fn layout(&self) {
         let cw = W - 2 * M;
         self.place(self.title, M, 18, cw, 34);
-        self.place(self.body, M, 64, cw, H - BAR - 64 - 16);
+        // Leaves room for the uninstall checkbox (siblings must not overlap).
+        self.place(self.body, M, 64, cw, H - BAR - 64 - 64);
 
         // Options.
         let mut y = 64;
@@ -1210,56 +1213,11 @@ impl Wizard {
         // SAFETY: our own window.
         let _ = unsafe { DestroyWindow(self.hwnd) };
     }
-
-    fn ctl_color(&self, hdc: HDC, ctl: HWND, in_bar: bool) -> LRESULT {
-        let role = self
-            .ctls
-            .iter()
-            .find(|c| c.hwnd == ctl)
-            .map(|c| c.role)
-            .unwrap_or(Role::Text);
-        let color = match role {
-            Role::Text => self.colors.text,
-            Role::Sub => self.colors.sub,
-            Role::Warn => self.colors.warn,
-        };
-        let (bg, brush) = if in_bar {
-            (self.colors.bar, self.bar_brush)
-        } else {
-            (self.colors.bg, self.bg_brush)
-        };
-        // SAFETY: HDC provided by the control for this message.
-        unsafe {
-            SetTextColor(hdc, color);
-            SetBkColor(hdc, bg);
-        }
-        LRESULT(brush.0 as isize)
-    }
-
-    fn paint_background(&self, hdc: HDC) {
-        let mut rc = RECT::default();
-        // SAFETY: valid window and DC.
-        unsafe {
-            let _ = GetClientRect(self.hwnd, &mut rc);
-            let split = rc.bottom - self.px(BAR);
-            let top = RECT {
-                bottom: split,
-                ..rc
-            };
-            let bar = RECT { top: split, ..rc };
-            FillRect(hdc, &top, self.bg_brush);
-            FillRect(hdc, &bar, self.bar_brush);
-        }
-    }
 }
 
 impl Handler for Wizard {
     fn handle(&mut self, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
         match msg {
-            WM_ERASEBKGND => {
-                self.paint_background(HDC(wparam.0 as *mut core::ffi::c_void));
-                Some(LRESULT(1))
-            }
             WM_PAINT => {
                 let mut ps = PAINTSTRUCT::default();
                 // SAFETY: standard paint cycle.
@@ -1269,16 +1227,6 @@ impl Handler for Wizard {
                 }
                 Some(LRESULT(0))
             }
-            WM_CTLCOLORSTATIC => Some(self.ctl_color(
-                HDC(wparam.0 as *mut core::ffi::c_void),
-                HWND(lparam.0 as *mut core::ffi::c_void),
-                false,
-            )),
-            WM_CTLCOLORBTN => Some(self.ctl_color(
-                HDC(wparam.0 as *mut core::ffi::c_void),
-                HWND(lparam.0 as *mut core::ffi::c_void),
-                true,
-            )),
             WM_COMMAND => {
                 let id = (wparam.0 & 0xFFFF) as u16;
                 let code = ((wparam.0 >> 16) & 0xFFFF) as u16;
@@ -1305,6 +1253,11 @@ impl Handler for Wizard {
                         SWP_NOZORDER | SWP_NOACTIVATE,
                     )
                 };
+                PAINT.with(|p| {
+                    if let Some(p) = p.borrow_mut().as_mut() {
+                        p.dpi = self.dpi;
+                    }
+                });
                 self.update_fonts();
                 self.layout();
                 Some(LRESULT(0))
@@ -1318,6 +1271,7 @@ impl Handler for Wizard {
                 unsafe {
                     let _ = DeleteObject(HGDIOBJ(self.font.0));
                     let _ = DeleteObject(HGDIOBJ(self.title_font.0));
+                    PAINT.with(|p| p.borrow_mut().take());
                     let _ = DeleteObject(HGDIOBJ(self.bg_brush.0));
                     let _ = DeleteObject(HGDIOBJ(self.bar_brush.0));
                     PostQuitMessage(self.exit_code);
@@ -1435,9 +1389,8 @@ fn run(kind: Kind) -> i32 {
         running: false,
         exit_code: exit::CANCELLED,
     };
-    // Build the window hidden, set up controls through a raw pointer to the
-    // boxed handler would break the RefCell model; instead create controls
-    // after creation via a one-shot posted setup message.
+    // Controls are created on WM_APP_INIT (posted below), when the handler
+    // knows its window handle and no other borrow is active.
     let hwnd = match window::create(
         CreateParams {
             class: CLASS,
@@ -1473,6 +1426,21 @@ fn run(kind: Kind) -> i32 {
             )
         };
     }
+    PAINT.with(|p| {
+        *p.borrow_mut() = Some(PaintState {
+            colors,
+            bg_brush,
+            bar_brush,
+            dpi,
+            roles: Vec::new(),
+        })
+    });
+    // SAFETY: subclassing our own window; the previous procedure is kept
+    // for CallWindowProcW.
+    unsafe {
+        let prev = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, paint_proc as *const () as isize);
+        PREV_PROC.with(|c| c.set(prev));
+    }
     set_icon(hwnd);
     // SAFETY: posting to our own window.
     let _ = unsafe { PostMessageW(Some(hwnd), WM_APP_INIT, WPARAM(0), LPARAM(0)) };
@@ -1498,6 +1466,13 @@ impl Handler for Setup {
         if msg == WM_APP_INIT && w.hwnd.is_invalid() {
             w.hwnd = hwnd;
             w.create_controls();
+            let roles: Vec<(isize, Role)> =
+                w.ctls.iter().map(|c| (c.hwnd.0 as isize, c.role)).collect();
+            PAINT.with(|p| {
+                if let Some(p) = p.borrow_mut().as_mut() {
+                    p.roles = roles;
+                }
+            });
             w.update_fonts();
             w.layout();
             let page = w.page;
@@ -1525,4 +1500,99 @@ pub fn run_install(ui: InstallUi) -> i32 {
 
 pub fn run_uninstall(ui: UninstallUi) -> i32 {
     run(Kind::Uninstall(ui))
+}
+
+/// Colours for WM_CTLCOLOR* and the background. Kept outside the wizard's
+/// handler because controls request their colours synchronously while the
+/// handler may be borrowed (e.g. a static repainting inside SetWindowTextW);
+/// the RefCell model would then fall back to default colours (white boxes
+/// in dark mode). A small subclass procedure answers those messages from
+/// this thread-local state without touching the handler.
+struct PaintState {
+    colors: Colors,
+    bg_brush: HBRUSH,
+    bar_brush: HBRUSH,
+    dpi: u32,
+    roles: Vec<(isize, Role)>,
+}
+
+thread_local! {
+    static PAINT: std::cell::RefCell<Option<PaintState>> = const { std::cell::RefCell::new(None) };
+    static PREV_PROC: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+}
+
+impl PaintState {
+    fn ctl_color(&self, hdc: HDC, ctl: HWND, in_bar: bool) -> LRESULT {
+        let role = self
+            .roles
+            .iter()
+            .find(|(h, _)| *h == ctl.0 as isize)
+            .map(|(_, r)| *r)
+            .unwrap_or(Role::Text);
+        let color = match role {
+            Role::Text => self.colors.text,
+            Role::Sub => self.colors.sub,
+            Role::Warn => self.colors.warn,
+        };
+        let (bg, brush) = if in_bar {
+            (self.colors.bar, self.bar_brush)
+        } else {
+            (self.colors.bg, self.bg_brush)
+        };
+        // SAFETY: HDC provided by the control for this message.
+        unsafe {
+            SetTextColor(hdc, color);
+            SetBkColor(hdc, bg);
+        }
+        LRESULT(brush.0 as isize)
+    }
+
+    fn erase(&self, hwnd: HWND, hdc: HDC) {
+        let mut rc = RECT::default();
+        // SAFETY: valid window and DC.
+        unsafe {
+            let _ = GetClientRect(hwnd, &mut rc);
+            let split = rc.bottom - BAR * self.dpi as i32 / 96;
+            let top = RECT {
+                bottom: split,
+                ..rc
+            };
+            let bar = RECT { top: split, ..rc };
+            FillRect(hdc, &top, self.bg_brush);
+            FillRect(hdc, &bar, self.bar_brush);
+        }
+    }
+}
+
+unsafe extern "system" fn paint_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    let hdc = HDC(wparam.0 as *mut core::ffi::c_void);
+    let ctl = HWND(lparam.0 as *mut core::ffi::c_void);
+    let handled = PAINT.with(|p| {
+        let p = p.try_borrow().ok()?;
+        let p = p.as_ref()?;
+        match msg {
+            WM_CTLCOLORSTATIC => Some(p.ctl_color(hdc, ctl, false)),
+            WM_CTLCOLORBTN => Some(p.ctl_color(hdc, ctl, true)),
+            WM_ERASEBKGND => {
+                p.erase(hwnd, hdc);
+                Some(LRESULT(1))
+            }
+            _ => None,
+        }
+    });
+    if let Some(r) = handled {
+        return r;
+    }
+    let prev = PREV_PROC.with(|c| c.get());
+    // SAFETY: `prev` is the window procedure we replaced (never 0 once
+    // subclassed; this procedure is only installed after that).
+    unsafe {
+        let prev: WNDPROC = std::mem::transmute::<isize, WNDPROC>(prev);
+        CallWindowProcW(prev, hwnd, msg, wparam, lparam)
+    }
 }
