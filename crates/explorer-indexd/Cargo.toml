@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "explorer-indexd"
+description = "explorer.rs file-name index daemon (explorer-rs-indexd) and its elevated MFT/USN helper (explorer-rs-index-helper)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "explorer-rs-indexd"
+path = "src/main.rs"
+
+[[bin]]
+name = "explorer-rs-index-helper"
+path = "src/helper_main.rs"
+
+[dependencies]
+explorer-core.workspace = true
+explorer-index.workspace = true
+explorer-index-client.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+explorer-win.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
