@@ -4,6 +4,10 @@
     Removes the per-user explorer.rs install made by install.ps1 (HKCU only, no admin needed).
 
 .DESCRIPTION
+    Only for installs made with install.ps1 (the portable alternative). Installs made with
+    explorer-rs-setup.exe are removed from Settings -> Apps -> Installed apps, or with
+    "%ProgramFiles%\explorer-rs\uninstall.exe" --uninstall.
+
     - Refuses to continue if the HKCU Winlogon Shell value points into the install folder
       (run restore-explorer.ps1 first).
     - Removes the HKCU Run value 'explorer-rs' if present.
@@ -50,6 +54,10 @@ function Get-RegValueInfo([string]$Path, [string]$Name) {
 }
 
 $Destination = $Destination.TrimEnd('\')
+$setupDir = Join-Path $env:ProgramFiles 'explorer-rs'
+if ($Destination -ieq $setupDir) {
+    throw "$Destination was installed by explorer-rs-setup.exe. Remove it with: `"$setupDir\uninstall.exe`" --uninstall"
+}
 if (-not (Test-Path -LiteralPath $Destination -PathType Container)) {
     Write-Host "Nothing installed at $Destination."
     return

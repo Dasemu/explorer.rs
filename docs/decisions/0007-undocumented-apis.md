@@ -13,6 +13,7 @@ must be listed here and in STATUS.md.
 | `IVirtualDesktopManagerInternal` & co. (via `winvd`) | virtual desktops | `virtual-desktops` |
 | `Shell_TrayWnd` `WM_COPYDATA` payload layout | tray host (planned) | `tray` |
 | `SetTaskmanWindow` / `SetShellWindow` (user32 exports) | possibly shell mode (not used yet) | — |
+| `"DarkMode_Explorer"` visual-style class name for `SetWindowTheme` | setup wizard: dark buttons, check boxes and scroll bars (ADR 0013) | — (cosmetic only: an unknown class leaves the light look; nothing else depends on it) |
 
 Documented but "not intended for general use": `RegisterShellHookWindow`.
 It is used unconditionally because the WinEvent hooks provide an independent

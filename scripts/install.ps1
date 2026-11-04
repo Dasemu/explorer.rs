@@ -4,6 +4,9 @@
     Installs explorer.rs per user, WITHOUT replacing the Windows shell (no admin, HKCU only).
 
 .DESCRIPTION
+    Portable alternative to the installer (explorer-rs-setup-<version>-x64.exe, see docs\INSTALL.md),
+    which is the recommended way to install. Do not use both on the same account.
+
     Copies explorer-rs*.exe, *.pdb, config.example.toml, LICENSE, *.md and the scripts folder to a
     stable per-user location (default: %LOCALAPPDATA%\Programs\explorer-rs). Creates
     %APPDATA%\explorer-rs\config.toml from config.example.toml if it does not exist yet.
@@ -43,6 +46,16 @@ $RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 if (-not $RunKey.StartsWith('HKCU:\')) { throw "Refusing to touch non-HKCU key: $RunKey" }
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+# The installer records itself under HKLM; both installs together would start explorer.rs twice.
+$setupKey = 'HKLM:\Software\explorer-rs'
+if (Test-Path -LiteralPath $setupKey) {
+    $setupDir = $null
+    try { $setupDir = (Get-ItemProperty -LiteralPath $setupKey).InstallDir } catch { $setupDir = $null }
+    Write-Warning "explorer.rs is already installed with the installer $(if ($setupDir) { "in $setupDir" })."
+    Write-Warning 'Uninstall it first (Settings -> Apps -> Installed apps) or keep using the installer.'
+    if (-not $Force) { throw 'Refusing to install a second copy. Use -Force to continue anyway.' }
+}
 
 # Locate the source folder: the script's parent folder (zip layout) or the script's own folder.
 $source = $null

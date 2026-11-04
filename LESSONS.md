@@ -94,3 +94,35 @@ Non-obvious findings. Add an entry whenever something surprises you.
 - **cargo-fuzz inside a nested checkout** (git worktree below the main repo)
   picks up the parent directory's workspace; `fuzz/Cargo.toml` needs its own
   `[workspace]` table.
+
+## Installer and resources (crates/explorer-setup, assets/)
+
+- **llvm-rc is enough; no `embed-resource` crate.** A shared `build.rs`
+  include writes an `.rc` and calls `llvm-rc -no-preprocess` (no Windows SDK
+  headers needed: use numeric IDs, `1 24 "x.manifest"`, `1 VERSIONINFO`), then
+  `cargo:rustc-link-arg-bin=<bin>=<res>`; lld-link accepts `.res` directly and
+  rustc/lld add no default manifest, so there is no duplicate-manifest error.
+  Verify with `llvm-readobj --coff-resources`.
+- **Every binary now ships a Common Controls v6 manifest.** The tooltip's
+  `TTTOOLINFOW` keeps the V2 `cbSize` (without `lpReserved`), which v6 also
+  accepts, so tooltips are unaffected; the comment in tooltip.rs saying "we
+  do not ship a v6 manifest" is outdated. v6 themes standard controls and
+  menus; `activeCodePage UTF-8` only affects `*A` APIs (we use `*W`).
+  Unverified on Windows.
+- **The RefCell handler model and WM_CTLCOLOR*.** Child controls request
+  colours synchronously (a static repainting during `SetWindowTextW`, a
+  check box during `BM_SETCHECK`). If that happens while the parent's
+  handler is borrowed, window.rs falls back to `DefWindowProcW` and the
+  control paints with default (light) colours. The setup wizard answers
+  `WM_CTLCOLOR*`/`WM_ERASEBKGND` from a tiny subclass procedure reading
+  thread-local state instead.
+- **Themed check boxes and radio buttons ignore the text colour** returned for
+  `WM_CTLCOLORSTATIC`; for dark mode draw them glyph-only next to an
+  `SS_NOTIFY` label that forwards clicks with `BM_CLICK`.
+- **Elevated processes must not run from user-writable folders.** A
+  self-relocating uninstaller copied to `%TEMP%` can be swapped, or get DLLs
+  planted next to it, by unelevated code of the same user; use a folder with
+  an administrators-only ACL (and re-create it if it is a junction).
+- **schtasks /XML** is most reliable with a UTF-16 LE + BOM file; Task
+  Scheduler runs actions at priority 7 (below normal) unless `<Priority>` says
+  otherwise, and kills them after 72 h unless `ExecutionTimeLimit` is `PT0S`.
