@@ -30,7 +30,7 @@ duplicated in a second language.
 - **Per-user state goes to `HKEY_USERS\<interactive SID>`**, never to the
   elevated process's HKCU. Machine state (choices, version) goes to
   `HKLM\Software\explorer-rs`; the supervisor reads `FileSearch` to enable
-  `indexd` (`explorer_core::setup::components_with_file_search_hint`)
+  `indexd` (`explorer_core::components`, `supervisor.file_search = "auto"`)
   because the installer cannot edit each user's config file.
 - **Shell registration is the last fatal step**, and any fatal failure after
   it rolls it back (`plan::rollback`): setup never leaves a half-registered
