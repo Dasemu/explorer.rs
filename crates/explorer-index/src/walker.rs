@@ -185,7 +185,10 @@ mod tests {
         apply(&mut ix, &rules, vec![Change::ReplaceTree { vol: v, tree }]);
         let c = ix.lookup(v, ["a", "b", "c.txt"]).unwrap();
         assert_eq!(ix.size(c), Some(5));
-        assert_eq!(ix.path(c), d.path().join("a/b/c.txt").to_string_lossy());
+        assert_eq!(
+            ix.path(c),
+            d.path().join("a").join("b").join("c.txt").to_string_lossy()
+        );
         ix.check_invariants().unwrap();
     }
 
