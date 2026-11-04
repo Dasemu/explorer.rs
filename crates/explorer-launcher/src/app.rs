@@ -1389,10 +1389,18 @@ impl Launcher {
                     CMD_START_SETTINGS,
                     tr(l, "Start settings", "Configuración de Inicio").into(),
                 ),
+                (
+                    CMD_EDIT_CONFIG,
+                    tr(l, "explorer.rs settings", "Configuración de explorer.rs").into(),
+                ),
                 (0, String::new()),
                 (
                     CMD_RESTART_START,
                     tr(l, "Restart Start menu", "Reiniciar el menú Inicio").into(),
+                ),
+                (
+                    CMD_RESTART_ALL,
+                    tr(l, "Restart explorer.rs", "Reiniciar explorer.rs").into(),
                 ),
             ],
             at,
@@ -1405,6 +1413,14 @@ impl Launcher {
                 String::new(),
                 false,
             ),
+            CMD_EDIT_CONFIG => {
+                self.hide(hwnd);
+                run_supervisor_cli("--edit-config");
+            }
+            CMD_RESTART_ALL => {
+                self.hide(hwnd);
+                run_supervisor_cli("--restart");
+            }
             CMD_RESTART_START => {
                 // The supervisor restarts a component that exits with
                 // EXIT_RESTART immediately.
@@ -3004,5 +3020,18 @@ impl Handler for Launcher {
             }
             _ => None,
         }
+    }
+}
+
+const CMD_EDIT_CONFIG: u32 = 0xE101;
+const CMD_RESTART_ALL: u32 = 0xE102;
+
+/// Run `explorer-rs.exe <arg>` (the supervisor/guardian binary next to us).
+fn run_supervisor_cli(arg: &str) {
+    let exe = std::env::current_exe()
+        .map(|p| p.with_file_name("explorer-rs.exe"))
+        .unwrap_or_else(|_| "explorer-rs.exe".into());
+    if let Err(e) = std::process::Command::new(&exe).arg(arg).spawn() {
+        tracing::error!(exe = %exe.display(), arg, error = %e, "cannot run explorer-rs");
     }
 }
