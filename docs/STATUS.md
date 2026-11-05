@@ -37,7 +37,7 @@ linked per area.
 | `explorer-rs-setup.exe`: bilingual Win32 wizard (Welcome, Options, Progress, Done), light/dark, silent mode (`--silent --mode= --file-search= --no-launch`), exit codes 0/1/2/3 |
 | Upgrade in place keeping user data; per-user settings written for the signed-in user (HKU\<SID>), also with over-the-shoulder elevation |
 | Start modes alongside / shell / none; rollback of the shell registration on failure |
-| Fast file search scheduled task `\explorer-rs\IndexHelper`; `\explorer-rs\Launch` task for unelevated launch; Start menu shortcuts (incl. "Restore Windows Explorer"); Installed apps entry; log in `%ProgramData%\explorer-rs\setup.log` |
+| Fast file search scheduled task `\explorer-rs\IndexHelper`; `\explorer-rs\Launch` task for unelevated launch; Start menu shortcuts (incl. "Restore Windows Explorer"); Installed apps entry; log in `%ProgramData%\explorer-rs\setup.log` (folder ownership taken and DACL reset before use); helper task started right after registration; only the current session's explorer.rs is stopped (warning for other signed-in users) |
 | Uninstaller (`uninstall.exe --uninstall [--silent] [--remove-user-data]`): restores the shell for every signed-in user pointing into the install folder, removes tasks, shortcuts, ARP entry, files |
 | Icon, manifest (PerMonitorV2, comctl32 v6, long paths, UTF-8) and version info embedded in every binary |
 
@@ -46,8 +46,9 @@ linked per area.
 | Item |
 |---|
 | Guardian (`explorer-rs --dev\|--shell`) restarting the supervisor (`--supervise`); crash log `%LOCALAPPDATA%\explorer-rs\state\crashlog.toml`; crash-loop fallback dialog; automatic restore of Windows Explorer after 3 failed sign-ins |
-| Emergency hotkeys Ctrl+Alt+Shift+E (Windows Explorer) / Ctrl+Alt+Shift+R (restart all) |
-| `--restore-explorer`, `--restart`, `--edit-config`, `--status [--output]` |
+| Emergency hotkeys Ctrl+Alt+Shift+E (Windows Explorer) / Ctrl+Alt+Shift+R (restart all; dev mode while the Explorer shell runs) |
+| Graceful stop via `ExplorerRs.Shutdown` (WM_CLOSE ignored; unexpected window loss → restart); apps launched from explorer.rs survive its restart (job breakaway); `--resume` for restarts by setup; orphaned-supervisor handling (unverified on Windows) |
+| `--restore-explorer` (guardian identified by its window, graceful stop, Explorer started afterwards), `--restart`, `--edit-config`, `--status [--output]` |
 | Config hot reload (2 s polling, per-component restart); `supervisor.file_search` (auto/on/off, HKLM `FileSearch`) |
 | Session-end detection (no restarts and no crash counting during sign-out) |
 | Shell mode: "shell ready" events; startup apps (Run, RunOnce, Startup folder, StartupApproved) |

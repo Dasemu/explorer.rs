@@ -45,8 +45,35 @@ startup apps, and drawing the desktop background.
 - **Config hot reload.** The supervisor polls (mtime, size) every 2 s and
   applies a change once the file has been stable for one poll; invalid files
   are logged and ignored. Only components whose config sections changed are
-  restarted (WM_CLOSE, then kill after 3 s); added/removed components are
-  started/stopped.
+  restarted (`ExplorerRs.Shutdown`, then kill after 3 s); added/removed
+  components are started/stopped. Cross-section dependencies count: the
+  taskbar also restarts on `[launcher] win_key_opens_launcher`, the launcher
+  on any `[taskbar]` change.
+- **Graceful stop** (revised after the integration review). Components no
+  longer close on `WM_CLOSE` (any program can send it); the registered
+  message `ExplorerRs.Shutdown` asks a component to exit with 0, the
+  supervisor to stop its components, the guardian to stop its supervisor
+  and record a clean end (`CrashState::mark_clean_stop`). A component's exit
+  code is the one set by a deliberate path; otherwise (main window
+  destroyed, stray `WM_QUIT`) it is `EXIT_RESTART`.
+- **Job object.** `KILL_ON_JOB_CLOSE` plus
+  `JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK`: only the components (assigned
+  explicitly) are members; apps they launch are not. Startup apps are
+  launched by the supervisor, which is not in its own job.
+- **Never two shells.** A shell-mode guardian starts the supervisor in dev
+  mode while the Windows Explorer shell runs (owner of the shell window or
+  of a `Shell_TrayWnd` is explorer.exe).
+- **Orphans.** The guardian passes its pid (`EXPLORER_RS_GUARDIAN_PID`);
+  the supervisor waits on that process and, once it is gone, handles
+  fallbacks itself instead of exiting with 79. `EXIT_ALREADY_RUNNING` (80)
+  retries back off 5 s → 60 s and are logged once.
+- **Resume.** `--resume` (with `--dev`/`--shell`) skips the sign-in
+  accounting and marks the shell duties as done; setup uses it when it
+  restarts an explorer.rs it stopped.
+- **Crash log writers.** The guardian is the writer while it runs;
+  `--restore-explorer` posts it `ExplorerRs.Restored` instead of writing.
+  Writes use unique temporary names and re-read the file first when it
+  changed on disk (`CrashLogFile`).
 - **File search default.** `supervisor.file_search = "auto"|"on"|"off"`;
   `auto` adds `indexd` when `HKLM\Software\explorer-rs\FileSearch = 1` and
   `components` is not set explicitly in the user's file.

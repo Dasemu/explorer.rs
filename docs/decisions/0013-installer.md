@@ -41,7 +41,22 @@ duplicated in a second language.
   describes); if Explorer does not run, through an on-demand scheduled task
   `\explorer-rs\Launch` for the interactive SID with `LeastPrivilege`.
 - **Scheduled tasks** are registered with `schtasks.exe /Create /XML`
-  (System32 path, UTF-16 file) from XML produced by tested code.
+  (System32 path, UTF-16 file) from XML produced by tested code. The XML
+  file is written into the protected `%ProgramData%\explorer-rs` (fresh
+  name, exclusive create, deleted afterwards), never `%TEMP%`. The index
+  helper task is started (`/Run`) right after it is registered.
+- **Protected ProgramData folder.** Before writing to
+  `%ProgramData%\explorer-rs` (and its `logs` subfolder for the elevated
+  index helper), setup removes a junction there, takes ownership for
+  Administrators and sets a protected DACL (SYSTEM/Administrators full,
+  Users read & execute). A pre-existing folder not owned by
+  Administrators/SYSTEM (a standard user can create it) has its contents
+  deleted first. The helper logs there only if both folders are owned by
+  Administrators/SYSTEM, and ignores the user's config.
+- **Other users' sessions.** Only explorer.rs processes in setup's own
+  session are stopped. Copies running for other signed-in users are left
+  alone (logged, and the options page says so); their locked files are
+  replaced at the next restart.
 - **Uninstall from a copy**: `uninstall.exe` copies itself into
   `%ProgramData%\explorer-rs` (ACL: administrators/SYSTEM full, users read;
   re-created if it is a junction) rather than `%TEMP%`, so nothing unprivileged

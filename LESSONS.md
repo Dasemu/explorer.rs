@@ -167,3 +167,21 @@ Non-obvious findings. Add an entry whenever something surprises you.
   do not. Startup apps are started by the supervisor, which is not a member
   of its own job, so they need no `CREATE_BREAKAWAY_FROM_JOB` (which fails
   when an outer job forbids breakaway).
+- **WM_CLOSE is not a private stop signal.** Any program (or Alt+F4) can
+  send it, and DefWindowProc then destroys the window; a component whose
+  main window vanished kept "running" invisibly or exited with 0 (= do not
+  restart). Use a registered message for graceful stops, ignore WM_CLOSE on
+  shell windows, and exit with EXIT_RESTART unless a deliberate path set the
+  exit code.
+- **"explorer.exe is running" is not "Explorer is the shell".** A File
+  Explorer window is also explorer.exe. Check who owns `GetShellWindow()` or a
+  `Shell_TrayWnd` (our own tray host uses that class too, so compare images).
+- **Messages that arrive while the handler is borrowed.** Re-posting them
+  with PostMessage spins inside a modal loop (TrackPopupMenu fetches the
+  message again at once); queue them per window and handle them when the
+  handler returns. Only posted (`!InSendMessage()`) WM_APP/registered ones.
+- **%ProgramData% folders can be pre-created by standard users.** Fixing the
+  DACL is not enough: the owner can rewrite it, and planted files stay. Take
+  ownership for Administrators (SeTakeOwnership/SeRestore), reset a
+  protected DACL, and wipe the contents of a folder that was not owned by
+  Administrators/SYSTEM before.
