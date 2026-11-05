@@ -1,73 +1,110 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! `explorer-rs`: the supervisor process.
+//! `explorer-rs`: guardian, supervisor and recovery commands.
 //!
-//! Starts each component (taskbar, launcher) as its own process and restarts
-//! it independently according to `explorer_core::supervisor`. A crash in one
-//! component never affects the others. The supervisor itself is kept small
-//! and free of UI code so that it has as little reason to crash as possible.
+//! - `explorer-rs --dev|--shell`: the **guardian**. A tiny process that runs
+//!   the supervisor as a child, restarts it with backoff, records crashes,
+//!   owns the emergency hotkeys and handles crash loops by falling back to
+//!   explorer.exe (see docs/RECOVERY.md, ADR 0014).
+//! - `explorer-rs --supervise --dev|--shell`: the **supervisor** (started by
+//!   the guardian). Starts each component (taskbar, launcher, desktop,
+//!   indexd) as its own process and restarts it independently according to
+//!   `explorer_core::supervisor`; reloads the config file when it changes;
+//!   in shell mode runs the startup apps once per sign-in.
+//! - `--restore-explorer`, `--edit-config`, `--status`: one-shot commands.
 //!
-//! Safety rule: without an explicit `--dev` or `--shell` flag the program
-//! only prints help. Registering as the Windows shell is never done here;
-//! see scripts/install-shell.ps1.
+//! Safety rule: without an explicit mode or command the program only prints
+//! help. Registering as the Windows shell is never done here; see
+//! scripts/install-shell.ps1.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::path::PathBuf;
 
 use clap::Parser;
-use explorer_core::config::Config;
-use explorer_core::ipc::{RunMode, MODE_ENV};
-use explorer_core::paths::AppPaths;
-use explorer_core::supervisor::{Decision, RestartTracker};
+use explorer_core::ipc::RunMode;
+
+mod cli;
+mod supervise;
+#[cfg(windows)]
+mod win_host;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "explorer-rs",
     version,
-    about = "explorer.rs: native Windows shell replacement (supervisor)",
+    about = "explorer.rs: native Windows shell replacement",
     after_help = "Use --dev to try explorer.rs alongside explorer.exe.\n\
                   --shell is only meant to be used by the per-user shell registration\n\
-                  done with scripts/install-shell.ps1. See docs/RECOVERY.md first."
+                  done by the installer or scripts/install-shell.ps1. See docs/RECOVERY.md.\n\
+                  Emergency keys: Ctrl+Alt+Shift+E starts explorer.exe,\n\
+                  Ctrl+Alt+Shift+R restarts explorer.rs."
 )]
-struct Args {
+pub struct Args {
     /// Windowed dev mode: run next to explorer.exe without replacing it.
     #[arg(long, conflicts_with = "shell")]
-    dev: bool,
+    pub dev: bool,
     /// Shell mode: explorer.rs is the user's shell (no explorer.exe).
     #[arg(long)]
-    shell: bool,
+    pub shell: bool,
+    /// With --dev/--shell: explorer.rs is being restarted (e.g. by setup
+    /// after an update), not started for a new sign-in. Skips the sign-in
+    /// accounting of the crash log and the once-per-sign-in shell duties
+    /// (startup apps, ready events).
+    #[arg(long, conflicts_with = "supervise")]
+    pub resume: bool,
+    /// Internal: run the supervisor itself (started by the guardian).
+    #[arg(long, hide = true)]
+    pub supervise: bool,
     /// Use this config file instead of %APPDATA%\explorer-rs\config.toml.
     #[arg(long, value_name = "PATH")]
-    config: Option<PathBuf>,
+    pub config: Option<PathBuf>,
     /// Run only one component.
-    #[arg(long, value_name = "COMPONENT", value_parser = ["taskbar", "launcher", "indexd"])]
-    only: Option<String>,
-}
-
-struct Component {
-    name: String,
-    exe: PathBuf,
-    child: Option<Child>,
-    started: Instant,
-    next_start: Option<Instant>,
-    tracker: RestartTracker,
-    done: bool,
-}
-
-fn component_exe(dir: &Path, name: &str) -> PathBuf {
-    dir.join(format!(
-        "explorer-rs-{name}{}",
-        std::env::consts::EXE_SUFFIX
-    ))
+    #[arg(long, value_name = "COMPONENT", value_parser = ["taskbar", "launcher", "indexd", "desktop"])]
+    pub only: Option<String>,
+    /// Restore Windows Explorer as this user's shell, stop explorer.rs and
+    /// start explorer.exe if it is not running.
+    #[arg(long, conflicts_with_all = ["dev", "shell", "supervise", "edit_config", "status", "resume"])]
+    pub restore_explorer: bool,
+    /// Create the config file from the default if missing and open it in
+    /// Notepad.
+    #[arg(long, conflicts_with_all = ["dev", "shell", "supervise", "status", "resume"])]
+    pub edit_config: bool,
+    /// Ask the running explorer.rs to restart all its components (same as
+    /// Ctrl+Alt+Shift+R).
+    #[arg(long, conflicts_with_all = ["dev", "shell", "supervise", "restore_explorer", "edit_config", "status", "resume"])]
+    pub restart: bool,
+    /// Print a diagnostics report (version, mode, components, shell
+    /// registration, config validity, recent crash-log events).
+    #[arg(long, conflicts_with_all = ["dev", "shell", "supervise", "resume"])]
+    pub status: bool,
+    /// With --status: write the report to this file instead of stdout.
+    #[arg(long, value_name = "PATH", requires = "status")]
+    pub output: Option<PathBuf>,
 }
 
 fn main() {
     #[cfg(windows)]
-    explorer_win::console::attach_parent();
+    let console = explorer_win::console::attach_parent();
+    #[cfg(not(windows))]
+    let console = true;
 
     let args = Args::parse();
+    if args.restore_explorer {
+        std::process::exit(cli::restore_explorer(console));
+    }
+    if args.restart {
+        std::process::exit(cli::restart());
+    }
+    if args.edit_config {
+        std::process::exit(cli::edit_config(args.config.as_deref()));
+    }
+    if args.status {
+        std::process::exit(cli::status(args.config.as_deref(), args.output.as_deref()));
+    }
+    if args.resume && !(args.dev || args.shell) {
+        eprintln!("--resume requires --dev or --shell");
+        std::process::exit(2);
+    }
     let mode = match (args.dev, args.shell) {
         (true, _) => RunMode::Dev,
         (_, true) => RunMode::Shell,
@@ -78,180 +115,12 @@ fn main() {
             std::process::exit(2);
         }
     };
-
-    let paths = AppPaths::from_env();
-    let _ = paths.ensure();
-    let config_path = args.config.clone().unwrap_or_else(|| paths.config_file());
-    let (config, config_err) = Config::load_or_default(&config_path);
-    let _log = explorer_core::logging::init(
-        "supervisor",
-        &paths.log_dir,
-        &config.general.log_level,
-        config.general.log_keep_files,
-    );
-    if let Some(e) = config_err {
-        tracing::error!(path = %config_path.display(), error = %e, "config error, using defaults");
-    }
-    tracing::info!(mode = mode.as_str(), config = %config_path.display(), "supervisor starting");
-
-    #[cfg(windows)]
-    let _instance = match explorer_win::single_instance::acquire("ExplorerRs.Supervisor") {
-        Some(g) => g,
-        None => {
-            tracing::warn!("another supervisor is already running; exiting");
-            return;
-        }
+    let code = if args.supervise {
+        supervise::main(mode, args.config.as_deref(), args.only.as_deref())
+    } else {
+        cli::guardian_main(mode, &args)
     };
-
-    let code = run(mode, &config, args.config.as_deref(), args.only.as_deref());
-    tracing::info!(code, "supervisor exiting");
-    drop(_log);
     std::process::exit(code);
-}
-
-fn run(mode: RunMode, config: &Config, config_override: Option<&Path>, only: Option<&str>) -> i32 {
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| PathBuf::from("."));
-
-    #[cfg(windows)]
-    let job = match explorer_win::job::KillOnCloseJob::new() {
-        Ok(j) => Some(j),
-        Err(e) => {
-            tracing::warn!(error = %e, "could not create job object; children may outlive the supervisor");
-            None
-        }
-    };
-
-    let names: Vec<String> = match only {
-        Some(n) => vec![n.to_string()],
-        None => config.supervisor.components.clone(),
-    };
-    let mut comps: Vec<Component> = names
-        .into_iter()
-        .map(|name| Component {
-            exe: component_exe(&exe_dir, &name),
-            name,
-            child: None,
-            started: Instant::now(),
-            next_start: Some(Instant::now()),
-            tracker: RestartTracker::new(&config.supervisor),
-            done: false,
-        })
-        .collect();
-    if comps.is_empty() {
-        tracing::error!("no components configured");
-        return 1;
-    }
-
-    let epoch = Instant::now();
-    loop {
-        let now = Instant::now();
-        for c in comps.iter_mut() {
-            if let Some(child) = c.child.as_mut() {
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        c.child = None;
-                        let uptime = now.duration_since(c.started).as_millis() as u64;
-                        let decision = c.tracker.on_exit(
-                            status.code(),
-                            uptime,
-                            now.duration_since(epoch).as_millis() as u64,
-                        );
-                        tracing::info!(component = %c.name, ?status, uptime_ms = uptime, ?decision, "component exited");
-                        match decision {
-                            Decision::RestartAfter(ms) => {
-                                c.next_start = Some(now + Duration::from_millis(ms))
-                            }
-                            Decision::Stop => c.done = true,
-                            Decision::GiveUp => {
-                                c.done = true;
-                                tracing::error!(component = %c.name, "crash loop detected; giving up on this component");
-                                if mode == RunMode::Shell && c.name == "taskbar" {
-                                    start_fallback_explorer();
-                                }
-                            }
-                            Decision::ShutdownAll => {
-                                tracing::info!(component = %c.name, "shutdown requested");
-                                shutdown(&mut comps);
-                                return 0;
-                            }
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(e) => tracing::warn!(component = %c.name, error = %e, "try_wait failed"),
-                }
-            }
-            if c.child.is_none() && !c.done && c.next_start.is_some_and(|t| now >= t) {
-                c.next_start = None;
-                match spawn(&c.exe, mode, config_override) {
-                    Ok(child) => {
-                        #[cfg(windows)]
-                        if let Some(j) = &job {
-                            if let Err(e) = j.assign(&child) {
-                                tracing::warn!(error = %e, "assigning child to job failed");
-                            }
-                        }
-                        tracing::info!(component = %c.name, pid = child.id(), "component started");
-                        c.child = Some(child);
-                        c.started = now;
-                    }
-                    Err(e) => {
-                        tracing::error!(component = %c.name, exe = %c.exe.display(), error = %e, "spawn failed");
-                        // Treat a failed spawn like a crash so backoff applies.
-                        let ms = now.duration_since(epoch).as_millis() as u64;
-                        match c.tracker.on_exit(Some(1), 0, ms) {
-                            Decision::RestartAfter(d) => {
-                                c.next_start = Some(now + Duration::from_millis(d))
-                            }
-                            _ => {
-                                c.done = true;
-                                if mode == RunMode::Shell && c.name == "taskbar" {
-                                    start_fallback_explorer();
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if comps.iter().all(|c| c.done) {
-            tracing::info!("all components stopped");
-            return 0;
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
-}
-
-fn spawn(exe: &Path, mode: RunMode, config_override: Option<&Path>) -> std::io::Result<Child> {
-    let mut cmd = Command::new(exe);
-    cmd.env(MODE_ENV, mode.as_str()).stdin(Stdio::null());
-    if let Some(p) = config_override {
-        cmd.arg("--config").arg(p);
-    }
-    cmd.spawn()
-}
-
-fn shutdown(comps: &mut [Component]) {
-    for c in comps.iter_mut() {
-        if let Some(mut child) = c.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        c.done = true;
-    }
-}
-
-/// Last-resort UI in shell mode: start explorer.exe so the user is never
-/// left with an empty screen. Because explorer.exe is not the registered
-/// shell in this situation it typically opens a File Explorer window rather
-/// than a full desktop (unverified), which is still enough to recover.
-fn start_fallback_explorer() {
-    tracing::warn!("starting explorer.exe as a fallback");
-    if let Err(e) = Command::new("explorer.exe").spawn() {
-        tracing::error!(error = %e, "could not start explorer.exe fallback");
-    }
 }
 
 #[cfg(test)]
@@ -259,17 +128,73 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exe_naming() {
-        let p = component_exe(Path::new("/opt/x"), "taskbar");
-        let name = p.file_name().unwrap().to_string_lossy().to_string();
-        assert!(name.starts_with("explorer-rs-taskbar"));
-    }
-
-    #[test]
     fn requires_explicit_mode_flag() {
         let a = Args::try_parse_from(["explorer-rs"]).unwrap();
         assert!(!a.dev && !a.shell);
         assert!(Args::try_parse_from(["explorer-rs", "--dev", "--shell"]).is_err());
         assert!(Args::try_parse_from(["explorer-rs", "--dev", "--only", "tray"]).is_err());
+        assert!(Args::try_parse_from(["explorer-rs", "--dev", "--only", "desktop"]).is_ok());
+    }
+
+    #[test]
+    fn commands_are_exclusive() {
+        assert!(Args::try_parse_from(["explorer-rs", "--restore-explorer"]).is_ok());
+        assert!(Args::try_parse_from(["explorer-rs", "--restore-explorer", "--shell"]).is_err());
+        assert!(Args::try_parse_from(["explorer-rs", "--status", "--output", "x.txt"]).is_ok());
+        assert!(Args::try_parse_from(["explorer-rs", "--output", "x.txt"]).is_err());
+        assert!(Args::try_parse_from(["explorer-rs", "--edit-config", "--status"]).is_err());
+        assert!(Args::try_parse_from(["explorer-rs", "--restart"]).is_ok());
+        assert!(Args::try_parse_from(["explorer-rs", "--restart", "--dev"]).is_err());
+        let a = Args::try_parse_from(["explorer-rs", "--shell", "--resume"]).unwrap();
+        assert!(a.shell && a.resume);
+        assert!(Args::try_parse_from(["explorer-rs", "--dev", "--resume"]).is_ok());
+        assert!(
+            Args::try_parse_from(["explorer-rs", "--supervise", "--shell", "--resume"]).is_err()
+        );
+        assert!(Args::try_parse_from(["explorer-rs", "--resume", "--status"]).is_err());
+        let a = Args::try_parse_from([
+            "explorer-rs",
+            "--supervise",
+            "--shell",
+            "--config",
+            "c.toml",
+            "--only",
+            "taskbar",
+        ])
+        .unwrap();
+        assert!(a.supervise && a.shell);
+    }
+
+    #[test]
+    fn guardian_passes_flags_to_supervisor() {
+        let a = Args::try_parse_from([
+            "explorer-rs",
+            "--dev",
+            "--config",
+            "C:/c.toml",
+            "--only",
+            "launcher",
+        ])
+        .unwrap();
+        let child = cli::supervisor_args(RunMode::Dev, &a);
+        let child: Vec<String> = child
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            child,
+            [
+                "--supervise",
+                "--dev",
+                "--config",
+                "C:/c.toml",
+                "--only",
+                "launcher"
+            ]
+        );
+        // The supervisor accepts what the guardian passes.
+        let mut full = vec!["explorer-rs".to_string()];
+        full.extend(child);
+        assert!(Args::try_parse_from(full).unwrap().supervise);
     }
 }

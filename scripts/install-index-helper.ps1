@@ -174,7 +174,7 @@ if ($StartNow) {
     Start-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName
     Start-Sleep -Seconds 2
     $p = Get-Process -Name 'explorer-rs-index-helper' -ErrorAction SilentlyContinue
-    if ($p) { Write-Host "Helper running (pid $($p.Id))." } else { Write-Warning 'Helper did not start; check %LOCALAPPDATA%\explorer-rs\logs\index-helper.*.log' }
+    if ($p) { Write-Host "Helper running (pid $($p.Id))." } else { Write-Warning 'Helper did not start; check %ProgramData%\explorer-rs\logs\index-helper.*.log (only written when that folder was created by the installer)' }
 }
 Write-Host 'Restart explorer-rs-indexd (or run "explorer-rs-indexd reindex") so it switches to the MFT source.'
 Write-Host 'Remove with: install-index-helper.ps1 -Uninstall'

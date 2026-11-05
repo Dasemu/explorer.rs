@@ -35,6 +35,7 @@ pub struct Config {
     pub launcher: LauncherConfig,
     pub supervisor: SupervisorConfig,
     pub index: IndexConfig,
+    pub desktop: DesktopConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -99,6 +100,16 @@ pub enum MonitorSelection {
     Primary,
 }
 
+/// Windows 11 "Combine taskbar buttons and hide labels".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Combine {
+    /// One button per app; several windows open the window picker.
+    Always,
+    /// One button per window.
+    Never,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TaskbarConfig {
@@ -114,6 +125,7 @@ pub struct TaskbarConfig {
     pub date_format: String,
     pub exclude_classes: Vec<String>,
     pub exclude_processes: Vec<String>,
+    pub combine: Combine,
 }
 
 impl Default for TaskbarConfig {
@@ -131,6 +143,7 @@ impl Default for TaskbarConfig {
             date_format: "%d/%m/%Y".into(),
             exclude_classes: Vec::new(),
             exclude_processes: Vec::new(),
+            combine: Combine::Always,
         }
     }
 }
@@ -140,6 +153,7 @@ impl Default for TaskbarConfig {
 pub struct TrayConfig {
     pub enabled: bool,
     pub intercept_in_dev_mode: bool,
+    pub show_all: bool,
 }
 
 impl Default for TrayConfig {
@@ -147,6 +161,7 @@ impl Default for TrayConfig {
         Self {
             enabled: true,
             intercept_in_dev_mode: true,
+            show_all: false,
         }
     }
 }
@@ -199,6 +214,62 @@ pub struct SupervisorConfig {
     pub crash_loop_max: u32,
     pub crash_loop_window_s: u64,
     pub components: Vec<String>,
+    /// Whether the file-name index daemon (`indexd`) runs. See
+    /// [`crate::components::resolve`].
+    pub file_search: FileSearch,
+}
+
+/// `supervisor.file_search`: run the file-name index daemon?
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FileSearch {
+    /// Follow the installer's choice (`HKLM\Software\explorer-rs\FileSearch`)
+    /// unless `components` is set explicitly.
+    #[default]
+    Auto,
+    /// Always run `indexd`.
+    On,
+    /// Never run `indexd`.
+    Off,
+}
+
+/// `[desktop]` section: the wallpaper window (`explorer-rs-desktop`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DesktopConfig {
+    pub enabled: DesktopMode,
+}
+
+impl Default for DesktopConfig {
+    fn default() -> Self {
+        Self {
+            enabled: DesktopMode::Shell,
+        }
+    }
+}
+
+/// When the desktop (wallpaper) window runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DesktopMode {
+    /// Only in shell mode (explorer.exe draws the desktop in dev mode).
+    #[default]
+    Shell,
+    /// In both modes.
+    Always,
+    /// Never.
+    Never,
+}
+
+impl DesktopMode {
+    /// Should the desktop window run in `mode`?
+    pub fn enabled_in(self, mode: crate::ipc::RunMode) -> bool {
+        match self {
+            DesktopMode::Shell => mode == crate::ipc::RunMode::Shell,
+            DesktopMode::Always => true,
+            DesktopMode::Never => false,
+        }
+    }
 }
 
 impl Default for SupervisorConfig {
@@ -208,16 +279,19 @@ impl Default for SupervisorConfig {
             restart_max_delay_ms: 30_000,
             crash_loop_max: 5,
             crash_loop_window_s: 60,
-            components: vec!["taskbar".into(), "launcher".into()],
+            components: vec!["taskbar".into(), "launcher".into(), "desktop".into()],
+            file_search: FileSearch::Auto,
         }
     }
 }
 
 /// Component names accepted in `supervisor.components`.
 ///
-/// `indexd` is known but not in the default list until it is verified on
-/// Windows; see docs/INDEX.md for how to enable it.
-pub const KNOWN_COMPONENTS: &[&str] = &["taskbar", "launcher", "indexd"];
+/// `indexd` is not in the default list; it is added by
+/// `supervisor.file_search` (see [`crate::components::resolve`]) or by
+/// listing it explicitly. `desktop` exits immediately unless enabled by
+/// `[desktop] enabled`.
+pub const KNOWN_COMPONENTS: &[&str] = &["taskbar", "launcher", "indexd", "desktop"];
 
 /// File-name index daemon (`explorer-rs-indexd`) settings. See docs/INDEX.md.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -408,6 +482,24 @@ mod tests {
         let c =
             Config::from_toml("[supervisor]\ncomponents = [\"taskbar\", \"indexd\"]\n").unwrap();
         assert_eq!(c.supervisor.components.len(), 2);
+    }
+
+    #[test]
+    fn desktop_and_file_search_keys() {
+        let c = Config::default();
+        assert!(c.supervisor.components.contains(&"desktop".to_string()));
+        assert_eq!(c.supervisor.file_search, FileSearch::Auto);
+        assert_eq!(c.desktop.enabled, DesktopMode::Shell);
+        let c = Config::from_toml(
+            "[supervisor]\nfile_search = \"off\"\n[desktop]\nenabled = \"always\"\n",
+        )
+        .unwrap();
+        assert_eq!(c.supervisor.file_search, FileSearch::Off);
+        assert!(c.desktop.enabled.enabled_in(crate::ipc::RunMode::Dev));
+        assert!(!DesktopMode::Shell.enabled_in(crate::ipc::RunMode::Dev));
+        assert!(DesktopMode::Shell.enabled_in(crate::ipc::RunMode::Shell));
+        assert!(!DesktopMode::Never.enabled_in(crate::ipc::RunMode::Shell));
+        assert!(Config::from_toml("[desktop]\nenabled = \"yes\"\n").is_err());
     }
 
     #[test]

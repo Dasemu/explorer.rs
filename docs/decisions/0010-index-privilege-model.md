@@ -47,6 +47,13 @@ Option 3, with option 5 as the automatic fallback.
   starts it automatically.
 - It refuses to run unless elevated, enumerates fixed NTFS drives itself and
   only accepts drive letters from that list.
+- It reads no user-writable input: the user's config file is ignored
+  (defaults), and it logs only to `%ProgramData%\explorer-rs\logs` when
+  that folder and its parent are owned by Administrators/SYSTEM (setup
+  secures them); otherwise it does not log to a file. (Logging into
+  `%LOCALAPPDATA%` would let a junction redirect its log rotation.)
+- The daemon retries the helper every 60 s for roots that fell back to
+  walking, so a helper started later is picked up without a restart.
 - Its pipe is `\\.\pipe\explorer-rs.index-helper.<user SID>` with the SDDL
   `D:P(A;;GA;;;<user SID>)S:(ML;;NW;;;ME)`: protected DACL granting only the
   user, and a *medium* mandatory label so that the non-elevated daemon may

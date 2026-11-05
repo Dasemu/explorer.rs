@@ -73,7 +73,7 @@ impl Tooltip {
     fn info(&mut self) -> TTTOOLINFOW {
         TTTOOLINFOW {
             // V2 size (without lpReserved) works with comctl32 v5 and v6;
-            // we do not ship a v6 manifest.
+            // the binaries ship a comctl32 v6 manifest; V2 size works with both.
             cbSize: (std::mem::size_of::<TTTOOLINFOW>() - std::mem::size_of::<usize>()) as u32,
             uFlags: TTF_TRACK | TTF_ABSOLUTE,
             hwnd: self.owner,

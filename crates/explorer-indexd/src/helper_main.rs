@@ -13,7 +13,9 @@
 //!   the helper's own directory;
 //! - answers only "journal info", "MFT chunk" and "journal chunk" requests
 //!   for fixed NTFS volumes it enumerated itself, returning raw record
-//!   bytes. It parses nothing and writes nothing.
+//!   bytes. It parses nothing and writes nothing;
+//! - ignores the user's config file and logs only to the protected
+//!   `%ProgramData%\explorer-rs\logs` (created by setup), or nowhere.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
@@ -32,24 +34,37 @@ fn main() {
 #[cfg(windows)]
 mod win {
     use explorer_core::config::Config;
-    use explorer_core::paths::AppPaths;
     use explorer_index::helper::serve;
     use explorer_index::source::Stop;
     use explorer_index::transport::{helper_endpoint, Access, Listener};
     use explorer_index::usn::{UsnBackend, UsnError};
     use explorer_index::win::{ntfs::DirectBackend, volumes};
-    use explorer_win::security;
+    use explorer_win::{secdir, security};
+
+    /// `%ProgramData%\explorer-rs\logs`, only if setup made it a protected
+    /// folder (owned by Administrators/SYSTEM, not a link). The elevated
+    /// helper never writes into user-writable folders such as
+    /// `%LOCALAPPDATA%` (a junction there could redirect log rotation).
+    fn trusted_log_dir() -> Option<std::path::PathBuf> {
+        let dir = secdir::program_data_dir().ok()?;
+        let logs = dir.join("logs");
+        (secdir::is_trusted_dir(&dir) && secdir::is_trusted_dir(&logs)).then_some(logs)
+    }
 
     pub fn run() -> i32 {
-        let paths = AppPaths::from_env();
-        let _ = paths.ensure();
-        let (config, _) = Config::load_or_default(&paths.config_file());
-        let _log = explorer_core::logging::init(
+        // The user's config is deliberately ignored: an elevated process
+        // must not be steered by user-writable files. Defaults only.
+        let config = Config::default();
+        let log_dir = trusted_log_dir();
+        let _log = explorer_core::logging::init_optional(
             "index-helper",
-            &paths.log_dir,
+            log_dir.as_deref(),
             &config.general.log_level,
             config.general.log_keep_files,
         );
+        if log_dir.is_none() {
+            tracing::warn!("%ProgramData%\\explorer-rs\\logs is missing or not protected; file logging disabled");
+        }
         if !security::is_elevated() {
             tracing::error!(
                 "the index helper must run elevated; see scripts/install-index-helper.ps1"

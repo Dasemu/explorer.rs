@@ -69,9 +69,32 @@ pub fn restore(current: Option<&str>, backup: Option<Option<String>>) -> Restore
     }
 }
 
+/// Preference of a process image as evidence of "who is signed in at the
+/// console": the Windows Explorer shell first, then explorer.rs. `None` for
+/// anything else.
+pub fn shell_process_rank(image: &str) -> Option<u8> {
+    let name = image.rsplit(['\\', '/']).next().unwrap_or(image);
+    if name.eq_ignore_ascii_case("explorer.exe") {
+        Some(0)
+    } else if name.eq_ignore_ascii_case("explorer-rs.exe") {
+        Some(1)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn console_user_evidence() {
+        assert_eq!(shell_process_rank("explorer.exe"), Some(0));
+        assert_eq!(shell_process_rank(r"C:\Windows\EXPLORER.EXE"), Some(0));
+        assert_eq!(shell_process_rank("explorer-rs.exe"), Some(1));
+        assert_eq!(shell_process_rank("explorer-rs-taskbar.exe"), None);
+        assert_eq!(shell_process_rank("svchost.exe"), None);
+    }
 
     #[test]
     fn command_and_detection() {

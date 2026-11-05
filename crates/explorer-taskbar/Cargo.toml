@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [features]
 default = []
+# No-op: Quick settings are always built (kept so old build scripts work).
 quick-settings = ["explorer-win/quick-settings"]
 virtual-desktops = ["explorer-win/virtual-desktops"]
 

@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "explorer-desktop"
+description = "explorer.rs desktop: wallpaper window for shell mode."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "explorer-rs-desktop"
+path = "src/main.rs"
+
+[dependencies]
+explorer-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+explorer-win.workspace = true
+
+[lints]
+workspace = true

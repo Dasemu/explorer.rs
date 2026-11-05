@@ -94,3 +94,94 @@ Non-obvious findings. Add an entry whenever something surprises you.
 - **cargo-fuzz inside a nested checkout** (git worktree below the main repo)
   picks up the parent directory's workspace; `fuzz/Cargo.toml` needs its own
   `[workspace]` table.
+- **Synchronous messages to our own window are dropped while its handler
+  runs.** `SetWindowPos`, `ShowWindow`, `SetWindowTextW` on a child EDIT
+  re-enter the window procedure and fall back to `DefWindowProcW`, so the
+  Start menu resizes its render target, lays out the EDIT and paints its
+  first frame itself after showing, instead of relying on WM_SIZE/WM_PAINT.
+- **Fuzzy matching on keywords is noisy.** Matching settings keywords with
+  the fuzzy scorer made "informe" find "About" (via "información"); keywords
+  now only count on a word-prefix match, names stay fuzzy.
+
+## Taskbar flyouts
+
+- **Never `DestroyWindow` a window from inside its own handler** with the
+  `RefCell` handler model: the nested `WM_NCDESTROY` frees the slot while the
+  outer borrow is alive. The taskbar reuses one hidden flyout window and keeps
+  its state in shared data instead.
+- **`MA_NOACTIVATE` on the bar makes flyout toggling simple**: clicking the
+  opener does not deactivate the open flyout, so the click can close it;
+  the deactivation debounce is only a safety net.
+
+## Recovery and shell mode (guardian, desktop)
+
+- **Message-only windows miss session end.** `WM_QUERYENDSESSION` /
+  `WM_ENDSESSION` are only sent to top-level windows; a hidden `WS_POPUP`
+  window is needed next to the message-only hotkey window.
+- **Once-per-session guards must outlive the process that does the work.** A
+  named event is destroyed with its last handle, so the guardian keeps a
+  handle open for the whole sign-in; the supervisor claims the event before
+  doing the work so a crash mid-way never repeats it.
+- **A pid-less "quit" in shell mode is dangerous.** If the guardian exited
+  when the user quit explorer.rs, the emergency hotkeys would go with it; in
+  shell mode it idles instead.
+- **`pkill -f <pattern>` in an agent shell can kill the shell itself** when the
+  pattern appears in its own command line; filter `ps -eo pid,comm` instead.
+
+## Installer and resources (crates/explorer-setup, assets/)
+
+- **llvm-rc is enough; no `embed-resource` crate.** A shared `build.rs`
+  include writes an `.rc` and calls `llvm-rc -no-preprocess` (no Windows SDK
+  headers needed: use numeric IDs, `1 24 "x.manifest"`, `1 VERSIONINFO`), then
+  `cargo:rustc-link-arg-bin=<bin>=<res>`; lld-link accepts `.res` directly and
+  rustc/lld add no default manifest, so there is no duplicate-manifest error.
+  Verify with `llvm-readobj --coff-resources`.
+- **Every binary now ships a Common Controls v6 manifest.** The tooltip's
+  `TTTOOLINFOW` keeps the V2 `cbSize` (without `lpReserved`), which v6 also
+  accepts, so tooltips are unaffected; the comment in tooltip.rs saying "we
+  do not ship a v6 manifest" is outdated. v6 themes standard controls and
+  menus; `activeCodePage UTF-8` only affects `*A` APIs (we use `*W`).
+  Unverified on Windows.
+- **The RefCell handler model and WM_CTLCOLOR*.** Child controls request
+  colours synchronously (a static repainting during `SetWindowTextW`, a
+  check box during `BM_SETCHECK`). If that happens while the parent's
+  handler is borrowed, window.rs falls back to `DefWindowProcW` and the
+  control paints with default (light) colours. The setup wizard answers
+  `WM_CTLCOLOR*`/`WM_ERASEBKGND` from a tiny subclass procedure reading
+  thread-local state instead.
+- **Themed check boxes and radio buttons ignore the text colour** returned for
+  `WM_CTLCOLORSTATIC`; for dark mode draw them glyph-only next to an
+  `SS_NOTIFY` label that forwards clicks with `BM_CLICK`.
+- **Elevated processes must not run from user-writable folders.** A
+  self-relocating uninstaller copied to `%TEMP%` can be swapped, or get DLLs
+  planted next to it, by unelevated code of the same user; use a folder with
+  an administrators-only ACL (and re-create it if it is a junction).
+- **schtasks /XML** is most reliable with a UTF-16 LE + BOM file; Task
+  Scheduler runs actions at priority 7 (below normal) unless `<Priority>` says
+  otherwise, and kills them after 72 h unless `ExecutionTimeLimit` is `PT0S`.
+- **A KILL_ON_JOB_CLOSE job captures grandchildren too.** Every process a
+  job member starts joins the job by default, so the supervisor's job killed
+  every app launched from the Start menu, the taskbar or the desktop when
+  explorer.rs restarted or quit. Set `JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK`
+  and assign the components explicitly: they stay members, their children
+  do not. Startup apps are started by the supervisor, which is not a member
+  of its own job, so they need no `CREATE_BREAKAWAY_FROM_JOB` (which fails
+  when an outer job forbids breakaway).
+- **WM_CLOSE is not a private stop signal.** Any program (or Alt+F4) can
+  send it, and DefWindowProc then destroys the window; a component whose
+  main window vanished kept "running" invisibly or exited with 0 (= do not
+  restart). Use a registered message for graceful stops, ignore WM_CLOSE on
+  shell windows, and exit with EXIT_RESTART unless a deliberate path set the
+  exit code.
+- **"explorer.exe is running" is not "Explorer is the shell".** A File
+  Explorer window is also explorer.exe. Check who owns `GetShellWindow()` or a
+  `Shell_TrayWnd` (our own tray host uses that class too, so compare images).
+- **Messages that arrive while the handler is borrowed.** Re-posting them
+  with PostMessage spins inside a modal loop (TrackPopupMenu fetches the
+  message again at once); queue them per window and handle them when the
+  handler returns. Only posted (`!InSendMessage()`) WM_APP/registered ones.
+- **%ProgramData% folders can be pre-created by standard users.** Fixing the
+  DACL is not enough: the owner can rewrite it, and planted files stay. Take
+  ownership for Administrators (SeTakeOwnership/SeRestore), reset a
+  protected DACL, and wipe the contents of a folder that was not owned by
+  Administrators/SYSTEM before.
