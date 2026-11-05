@@ -69,7 +69,9 @@ pub fn init_optional(
                 .with(fmt::layer().with_writer(std::io::stderr))
                 .try_init();
             match log_dir {
-                Some(d) => tracing::warn!(dir = %d.display(), "log directory unusable, logging to stderr only"),
+                Some(d) => {
+                    tracing::warn!(dir = %d.display(), "log directory unusable, logging to stderr only")
+                }
                 None => tracing::info!("no log directory; logging to stderr only"),
             }
             None

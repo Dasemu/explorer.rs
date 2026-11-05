@@ -13,7 +13,9 @@
 //!   the helper's own directory;
 //! - answers only "journal info", "MFT chunk" and "journal chunk" requests
 //!   for fixed NTFS volumes it enumerated itself, returning raw record
-//!   bytes. It parses nothing and writes nothing.
+//!   bytes. It parses nothing and writes nothing;
+//! - ignores the user's config file and logs only to the protected
+//!   `%ProgramData%\explorer-rs\logs` (created by setup), or nowhere.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 

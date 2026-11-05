@@ -447,6 +447,9 @@ pub fn launch_args(
     })
 }
 
+/// Processes as (pid, image path).
+pub type ProcList = Vec<(u32, String)>;
+
 /// A process seen by setup: pid, image path, Windows session (if known).
 pub type SessionProcess = (u32, String, Option<u32>);
 
@@ -458,7 +461,7 @@ pub type SessionProcess = (u32, String, Option<u32>);
 pub fn split_sessions(
     procs: &[SessionProcess],
     current: Option<u32>,
-) -> (Vec<(u32, String)>, Vec<(u32, String)>) {
+) -> (ProcList, ProcList) {
     let mut mine = Vec::new();
     let mut other = Vec::new();
     for (pid, path, session) in procs {

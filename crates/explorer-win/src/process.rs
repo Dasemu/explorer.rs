@@ -41,6 +41,15 @@ pub fn session_of(pid: u32) -> Option<u32> {
 pub fn session_processes() -> Vec<ProcessInfo> {
     // SAFETY: plain query.
     let own_session = session_of(unsafe { GetCurrentProcessId() });
+    enumerate(|pid| own_session.is_none() || session_of(pid) == own_session)
+}
+
+/// All processes of every session.
+pub fn all_processes() -> Vec<ProcessInfo> {
+    enumerate(|_| true)
+}
+
+fn enumerate(keep: impl Fn(u32) -> bool) -> Vec<ProcessInfo> {
     let mut out = Vec::new();
     // SAFETY: snapshot handle is closed below; entry struct is sized.
     unsafe {
@@ -54,7 +63,7 @@ pub fn session_processes() -> Vec<ProcessInfo> {
         let mut ok = Process32FirstW(snap, &mut e).is_ok();
         while ok {
             let pid = e.th32ProcessID;
-            if own_session.is_none() || session_of(pid) == own_session {
+            if keep(pid) {
                 out.push(ProcessInfo {
                     pid,
                     exe: from_wide(&e.szExeFile),
