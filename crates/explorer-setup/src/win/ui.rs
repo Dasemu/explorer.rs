@@ -252,6 +252,8 @@ struct Wizard {
     radio_labels: [HWND; 3],
     radio_descs: [HWND; 3],
     shell_now: HWND,
+    /// Warning: explorer.rs runs for another signed-in user.
+    other_users: HWND,
     mode_label: HWND,
     c_search: HWND,
     l_search: HWND,
@@ -526,6 +528,17 @@ impl Wizard {
             none,
             0,
         );
+        self.other_users = make(
+            p,
+            w!("STATIC"),
+            s(
+                "Another signed-in user is running explorer.rs. Setup does not close it; its files in use are replaced when the computer restarts.",
+                "Otro usuario con la sesión iniciada está usando explorer.rs. El instalador no lo cierra; sus archivos en uso se reemplazarán al reiniciar el equipo.",
+            ),
+            st,
+            none,
+            0,
+        );
         for (h, r) in [
             (self.c_search, Role::Text),
             (self.l_search, Role::Text),
@@ -535,6 +548,7 @@ impl Wizard {
             (self.dir_label, Role::Text),
             (self.dir_edit, Role::Text),
             (self.shell_now, Role::Warn),
+            (self.other_users, Role::Warn),
         ] {
             self.ctls.push(Ctl {
                 hwnd: h,
@@ -774,6 +788,12 @@ impl Wizard {
         self.place(self.dir_edit, M + 154, y, cw - 154, 24);
         y += 34;
         self.place(self.shell_now, M, y, cw, 36);
+        let other_y = if self.kind.facts().ours_is_shell() {
+            y + 40
+        } else {
+            y
+        };
+        self.place(self.other_users, M, other_y, cw, 36);
 
         // Uninstall confirm: body above, checkbox at the bottom of the area.
         self.place_choice(self.c_data, self.l_data, None, M, H - BAR - 48);
@@ -800,6 +820,18 @@ impl Wizard {
         }
         let lang = self.lang();
         let shell_warning = self.kind.facts().ours_is_shell();
+        let other_users = self.kind.facts().ours_other_sessions > 0;
+        // SAFETY: valid child window.
+        let _ = unsafe {
+            ShowWindow(
+                self.other_users,
+                if page == Page::Options && other_users {
+                    SW_SHOW
+                } else {
+                    SW_HIDE
+                },
+            )
+        };
         // SAFETY: valid child window.
         let _ = unsafe {
             ShowWindow(
@@ -1372,6 +1404,7 @@ fn run(kind: Kind) -> i32 {
         radio_labels: [HWND::default(); 3],
         radio_descs: [HWND::default(); 3],
         shell_now: HWND::default(),
+        other_users: HWND::default(),
         mode_label: HWND::default(),
         c_search: HWND::default(),
         l_search: HWND::default(),
