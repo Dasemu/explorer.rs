@@ -27,8 +27,20 @@ pub struct LogGuard {
 /// Initialise logging for `component`. Never fails: if the log directory
 /// cannot be used we log to stderr only, because a shell must keep running.
 pub fn init(component: &str, log_dir: &Path, level: &str, keep_files: usize) -> LogGuard {
+    init_optional(component, Some(log_dir), level, keep_files)
+}
+
+/// [`init`] with an optional log directory: `None` logs to stderr only
+/// (e.g. an elevated process whose log folder is not trustworthy).
+pub fn init_optional(
+    component: &str,
+    log_dir: Option<&Path>,
+    level: &str,
+    keep_files: usize,
+) -> LogGuard {
     let filter = EnvFilter::try_from_env(LOG_ENV).unwrap_or_else(|_| EnvFilter::new(level));
-    let appender = std::fs::create_dir_all(log_dir).ok().and_then(|_| {
+    let appender = log_dir.and_then(|log_dir| {
+        std::fs::create_dir_all(log_dir).ok()?;
         RollingFileAppender::builder()
             .rotation(Rotation::DAILY)
             .filename_prefix(component)
@@ -56,7 +68,10 @@ pub fn init(component: &str, log_dir: &Path, level: &str, keep_files: usize) -> 
                 .with(filter)
                 .with(fmt::layer().with_writer(std::io::stderr))
                 .try_init();
-            tracing::warn!(dir = %log_dir.display(), "log directory unusable, logging to stderr only");
+            match log_dir {
+                Some(d) => tracing::warn!(dir = %d.display(), "log directory unusable, logging to stderr only"),
+                None => tracing::info!("no log directory; logging to stderr only"),
+            }
             None
         }
     };

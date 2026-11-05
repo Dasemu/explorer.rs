@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use explorer_win::util::WideString;
 use explorer_win::windows::core::{GUID, HSTRING, PCWSTR};
-use explorer_win::windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, LUID, WPARAM};
+use explorer_win::windows::Win32::Foundation::{CloseHandle, HANDLE, LUID};
 use explorer_win::windows::Win32::Security::{
     AdjustTokenPrivileges, LookupPrivilegeValueW, SE_DEBUG_NAME, SE_PRIVILEGE_ENABLED,
     TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
@@ -23,9 +23,6 @@ use explorer_win::windows::Win32::System::Threading::{
     PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
 };
 use explorer_win::windows::Win32::UI::Shell::{SHGetKnownFolderPath, KF_FLAG_DEFAULT};
-use explorer_win::windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetShellWindow, GetWindowThreadProcessId, PostMessageW, WM_CLOSE,
-};
 
 /// Path of a known folder (e.g. `FOLDERID_ProgramFiles`).
 pub fn known_folder(id: &GUID) -> Result<String> {
@@ -72,9 +69,9 @@ pub fn enable_debug_privilege() {
     }
 }
 
-/// All processes with their image path (processes we cannot query are
-/// skipped).
-pub fn processes() -> Vec<(u32, String)> {
+/// All processes with their image path and Windows session (processes we
+/// cannot query are skipped; an unknown session is `None`).
+pub fn processes() -> Vec<crate::plan::SessionProcess> {
     let mut pids = vec![0u32; 4096];
     let mut needed = 0u32;
     // SAFETY: buffer and byte size match.
@@ -87,9 +84,20 @@ pub fn processes() -> Vec<(u32, String)> {
         .filter_map(|pid| {
             explorer_win::security::process_image_path(pid)
                 .ok()
-                .map(|p| (pid, p.to_string_lossy().into_owned()))
+                .map(|p| {
+                    (
+                        pid,
+                        p.to_string_lossy().into_owned(),
+                        explorer_win::process::session_of(pid),
+                    )
+                })
         })
         .collect()
+}
+
+/// This process's Windows session.
+pub fn current_session() -> Option<u32> {
+    explorer_win::process::session_of(std::process::id())
 }
 
 struct Proc(HANDLE);
@@ -117,39 +125,18 @@ pub fn wait_exit(pid: u32, timeout: Duration) -> bool {
     unsafe { WaitForSingleObject(p.0, timeout.as_millis().min(u32::MAX as u128) as u32) }.0 == 0
 }
 
-/// Ask the processes to close (WM_CLOSE to their top-level windows), wait
-/// up to `grace`, then terminate whatever is left, in the given order.
-/// Returns the processes that could not be stopped.
+/// Ask the processes to stop (`ExplorerRs.Shutdown` to their top-level
+/// windows: the guardian records a clean end, the supervisor and the
+/// components exit with 0), wait up to `grace`, then terminate whatever is
+/// left, in the given order. Returns the processes that could not be
+/// stopped.
 pub fn stop_processes(procs: &[(u32, String)], grace: Duration) -> Vec<(u32, String)> {
     if procs.is_empty() {
         return Vec::new();
     }
-    struct Ctx<'a> {
-        pids: &'a [u32],
-        posted: usize,
-    }
-    unsafe extern "system" fn cb(hwnd: HWND, lp: LPARAM) -> explorer_win::windows::core::BOOL {
-        // SAFETY: lp is the &mut Ctx passed below, valid during EnumWindows.
-        let ctx = unsafe { &mut *(lp.0 as *mut Ctx) };
-        let mut pid = 0u32;
-        // SAFETY: valid out-pointer.
-        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
-        if ctx.pids.contains(&pid) {
-            // SAFETY: posting to a window; no pointers.
-            if unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) }.is_ok() {
-                ctx.posted += 1;
-            }
-        }
-        true.into()
-    }
     let pids: Vec<u32> = procs.iter().map(|p| p.0).collect();
-    let mut ctx = Ctx {
-        pids: &pids,
-        posted: 0,
-    };
-    // SAFETY: callback only uses ctx during the call.
-    let _ = unsafe { EnumWindows(Some(cb), LPARAM(&mut ctx as *mut Ctx as isize)) };
-    tracing::info!(posted = ctx.posted, "asked explorer.rs windows to close");
+    let posted = explorer_win::process::post_shutdown_all(&pids);
+    tracing::info!(posted, "asked explorer.rs to stop");
 
     let deadline = Instant::now() + grace;
     for (pid, _) in procs {
@@ -176,22 +163,6 @@ pub fn stop_processes(procs: &[(u32, String)], grace: Duration) -> Vec<(u32, Str
         }
     }
     failed
-}
-
-/// True if Windows Explorer provides the desktop (owns the shell window).
-pub fn explorer_shell_running() -> bool {
-    // SAFETY: plain queries.
-    let shell = unsafe { GetShellWindow() };
-    if shell.is_invalid() {
-        return false;
-    }
-    let mut pid = 0u32;
-    // SAFETY: valid out-pointer.
-    unsafe { GetWindowThreadProcessId(shell, Some(&mut pid)) };
-    explorer_win::security::process_image_path(pid)
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()))
-        .is_some_and(|n| n == "explorer.exe")
 }
 
 fn move_file(from: &Path, to: Option<&Path>, flags: u32) -> Result<()> {

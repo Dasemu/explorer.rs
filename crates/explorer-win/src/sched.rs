@@ -6,8 +6,9 @@
 //! console window is suppressed.
 
 use std::os::windows::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{bail, Context, Result};
 
@@ -52,14 +53,36 @@ pub fn exists(name: &str) -> bool {
 }
 
 /// Register (or replace) a task from its XML definition. `xml_file_bytes`
-/// is the complete file content (UTF-16 LE with BOM).
-pub fn create_from_xml(name: &str, xml_file_bytes: &[u8]) -> Result<()> {
-    let path = std::env::temp_dir().join(format!(
-        "explorer-rs-task-{}-{}.xml",
+/// is the complete file content (UTF-16 LE with BOM). The XML file is
+/// written to `protected_dir` (administrators-only, see `secdir`; never
+/// `%TEMP%`, which unelevated code of the same user could tamper with
+/// between the write and schtasks reading it) under a fresh name with an
+/// exclusive create, and deleted afterwards.
+pub fn create_from_xml(name: &str, xml_file_bytes: &[u8], protected_dir: &Path) -> Result<()> {
+    use std::io::Write;
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = protected_dir.join(format!(
+        "task-{}-{stamp:x}-{}.xml",
         std::process::id(),
-        name.rsplit('\\').next().unwrap_or("task")
+        COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(&path, xml_file_bytes).with_context(|| format!("write {}", path.display()))?;
+    {
+        // create_new: fail rather than reuse anything already there.
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .with_context(|| format!("create {}", path.display()))?;
+        if let Err(e) = f.write_all(xml_file_bytes).and_then(|_| f.sync_all()) {
+            drop(f);
+            let _ = std::fs::remove_file(&path);
+            return Err(e).with_context(|| format!("write {}", path.display()));
+        }
+    }
     let p = path.to_string_lossy().into_owned();
     let out = run(&["/Create", "/TN", name, "/XML", &p, "/F"]);
     let _ = std::fs::remove_file(&path);

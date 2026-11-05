@@ -52,14 +52,23 @@ pub fn gather_facts() -> Result<Facts> {
     let install_dir = format!(r"{program_files}\{}", plan::INSTALL_DIR_NAME);
     let user_sid = explorer_win::shellreg::interactive_user_sid()
         .context("cannot determine the signed-in user")?;
-    let ours_running =
-        !plan::stop_order(&sys::processes(), &install_dir, std::process::id()).is_empty();
+    let (mine, other) = plan::split_sessions(&sys::processes(), sys::current_session());
+    let me = std::process::id();
+    let ours_running = !plan::stop_order(&mine, &install_dir, me).is_empty();
+    let foreign = plan::stop_order(&other, &install_dir, me);
+    if !foreign.is_empty() {
+        tracing::warn!(
+            ?foreign,
+            "explorer.rs runs in other sessions (other signed-in users); it is not stopped and its files are replaced at the next restart"
+        );
+    }
     Ok(Facts {
         start_menu_dir: format!(r"{programs}\{}", plan::START_MENU_FOLDER),
         install_dir,
         user_sid,
-        explorer_shell_running: sys::explorer_shell_running(),
+        explorer_shell_running: explorer_win::process::explorer_shell_running(),
         ours_running,
+        ours_other_sessions: foreign.len(),
     })
 }
 
@@ -186,10 +195,13 @@ impl<'a> Exec<'a> {
                 sys::write_file(&dest, plan::format_manifest(files).as_bytes())?;
                 Ok(())
             }
-            Step::CreateTask { name, xml } => {
-                explorer_win::sched::create_from_xml(name, &crate::task_xml::to_utf16_file(xml))
-            }
+            Step::CreateTask { name, xml } => explorer_win::sched::create_from_xml(
+                name,
+                &crate::task_xml::to_utf16_file(xml),
+                &crate::win::log::secure_data_dir()?,
+            ),
             Step::DeleteTask(name) => explorer_win::sched::delete(name).map(|_| ()),
+            Step::RunTask(name) => explorer_win::sched::run_now(name),
             Step::CreateShortcuts(list) => {
                 let dir = PathBuf::from(&self.facts.start_menu_dir);
                 // Start clean so shortcuts named in another language vanish.
@@ -225,7 +237,7 @@ impl<'a> Exec<'a> {
             Step::RegisterShell { sid, exe } => Hive::User(sid.clone()).register_shell(exe),
             Step::RestoreShell { sid } => Hive::User(sid.clone()).restore_shell().map(|_| ()),
             Step::StartExplorerIfMissing => {
-                if sys::explorer_shell_running() {
+                if explorer_win::process::explorer_shell_running() {
                     return Ok(());
                 }
                 let exe = launch::explorer_exe();
@@ -235,7 +247,8 @@ impl<'a> Exec<'a> {
                     .unwrap_or_default();
                 launch::start_unelevated(&exe, "", &dir, &self.facts.user_sid)?;
                 let deadline = Instant::now() + Duration::from_secs(15);
-                while !sys::explorer_shell_running() && Instant::now() < deadline {
+                while !explorer_win::process::explorer_shell_running() && Instant::now() < deadline
+                {
                     std::thread::sleep(Duration::from_millis(250));
                 }
                 Ok(())
@@ -270,14 +283,23 @@ impl<'a> Exec<'a> {
         let me = std::process::id();
         // Twice: the supervisor may restart a component between listing and
         // stopping.
+        // Only this session: other signed-in users keep their explorer.rs
+        // (their locked files are replaced at the next restart).
         let mut failed = Vec::new();
         for _ in 0..2 {
-            let order = plan::stop_order(&sys::processes(), &self.facts.install_dir, me);
+            let (mine, other) = plan::split_sessions(&sys::processes(), sys::current_session());
+            let foreign = plan::stop_order(&other, &self.facts.install_dir, me);
+            if !foreign.is_empty() {
+                tracing::info!(?foreign, "left running (other sessions)");
+            }
+            let order = plan::stop_order(&mine, &self.facts.install_dir, me);
             if order.is_empty() {
                 return Ok(());
             }
             tracing::info!(?order, "stopping");
-            failed = sys::stop_processes(&order, Duration::from_secs(3));
+            // The guardian gives its supervisor up to 8 s; components exit
+            // within about a second of the shutdown message.
+            failed = sys::stop_processes(&order, Duration::from_secs(6));
         }
         if !failed.is_empty() {
             self.warn(format!("could not stop: {failed:?}"));

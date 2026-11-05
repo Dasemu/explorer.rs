@@ -20,3 +20,32 @@ pub const VALUE_FILE_SEARCH: &str = "FileSearch";
 pub const RUN_VALUE_NAME: &str = "explorer-rs";
 /// `Run` key, relative to a user hive.
 pub const RUN_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+
+/// Well-known SID of `NT AUTHORITY\SYSTEM`.
+pub const SID_SYSTEM: &str = "S-1-5-18";
+/// Well-known SID of `BUILTIN\Administrators`.
+pub const SID_ADMINISTRATORS: &str = "S-1-5-32-544";
+
+/// Is `sid` an owner an elevated process may trust for a folder in
+/// `%ProgramData%` (Administrators or SYSTEM)? Any other owner (a standard
+/// user who pre-created the folder) can change its permissions and
+/// contents at will.
+pub fn trusted_owner_sid(sid: &str) -> bool {
+    let s = sid.trim();
+    s.eq_ignore_ascii_case(SID_SYSTEM) || s.eq_ignore_ascii_case(SID_ADMINISTRATORS)
+}
+
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+
+    #[test]
+    fn trusted_owners() {
+        assert!(trusted_owner_sid("S-1-5-18"));
+        assert!(trusted_owner_sid("S-1-5-32-544"));
+        assert!(!trusted_owner_sid("S-1-5-21-1-2-3-1001"));
+        assert!(!trusted_owner_sid("S-1-5-32-545")); // Users
+        assert!(!trusted_owner_sid("S-1-5-32-5440"));
+        assert!(!trusted_owner_sid(""));
+    }
+}

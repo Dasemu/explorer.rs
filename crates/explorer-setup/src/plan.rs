@@ -115,8 +115,13 @@ pub struct Facts {
     pub user_sid: String,
     /// Windows Explorer currently provides the desktop (shell window).
     pub explorer_shell_running: bool,
-    /// Some explorer-rs*.exe from the install folder is running.
+    /// Some explorer-rs*.exe from the install folder is running in the
+    /// current Windows session.
     pub ours_running: bool,
+    /// explorer-rs*.exe processes from the install folder running in other
+    /// sessions (other signed-in users). They are never stopped; their
+    /// files are replaced at the next restart.
+    pub ours_other_sessions: usize,
 }
 
 impl Facts {
@@ -172,6 +177,9 @@ pub enum Step {
     },
     /// `schtasks /Delete /TN name /F` (missing task = success).
     DeleteTask(String),
+    /// `schtasks /Run /TN name`: start a just-registered task now (it
+    /// would otherwise only start at the next sign-in).
+    RunTask(String),
     CreateShortcuts(Vec<Shortcut>),
     /// Values under HKLM\Software\explorer-rs.
     WriteMachineState(Vec<(String, RegValue)>),
@@ -222,6 +230,7 @@ impl Step {
             self,
             Step::RemoveStaleFiles(_)
                 | Step::DeleteTask(_)
+                | Step::RunTask(_)
                 | Step::Launch { .. }
                 | Step::StartExplorerIfMissing
                 | Step::RemoveUserData
@@ -255,6 +264,10 @@ impl Step {
                 "Registrando el asistente de búsqueda rápida",
             ),
             Step::DeleteTask(_) => s("Removing scheduled tasks", "Eliminando tareas programadas"),
+            Step::RunTask(_) => s(
+                "Starting the fast file search helper",
+                "Iniciando el asistente de búsqueda rápida",
+            ),
             Step::CreateShortcuts(_) => s(
                 "Creating Start menu shortcuts",
                 "Creando accesos directos del menú Inicio",
@@ -411,20 +424,52 @@ pub fn machine_state(install_dir: &str, version: &str, c: &Choices) -> Vec<(Stri
 /// explorer.rs is restarted when it was running before (setup stopped it)
 /// or when the user asked for it. `--shell` only when shell mode was chosen
 /// and Windows Explorer is not running (otherwise two shells would fight).
+/// A restart of an explorer.rs that was running adds `--resume`: it is not
+/// a new sign-in (no failed-sign-in accounting, no startup apps again).
 pub fn launch_args(
     mode: StartMode,
     launch: bool,
     was_running: bool,
     explorer_shell_running: bool,
-) -> Option<&'static str> {
+) -> Option<String> {
     if !(launch || was_running) {
         return None;
     }
-    if mode == StartMode::Shell && !explorer_shell_running {
-        Some("--shell")
+    let base = if mode == StartMode::Shell && !explorer_shell_running {
+        "--shell"
     } else {
-        Some("--dev")
+        "--dev"
+    };
+    Some(if was_running {
+        format!("{base} --resume")
+    } else {
+        base.to_string()
+    })
+}
+
+/// A process seen by setup: pid, image path, Windows session (if known).
+pub type SessionProcess = (u32, String, Option<u32>);
+
+/// Split processes into those of the current session (setup may stop
+/// them) and those of other sessions (other signed-in users: never
+/// stopped). A process whose session is unknown is treated as foreign; if
+/// the current session is unknown, everything counts as current (the old
+/// behaviour).
+pub fn split_sessions(
+    procs: &[SessionProcess],
+    current: Option<u32>,
+) -> (Vec<(u32, String)>, Vec<(u32, String)>) {
+    let mut mine = Vec::new();
+    let mut other = Vec::new();
+    for (pid, path, session) in procs {
+        let entry = (*pid, path.clone());
+        match current {
+            None => mine.push(entry),
+            Some(c) if *session == Some(c) => mine.push(entry),
+            Some(_) => other.push(entry),
+        }
     }
+    (mine, other)
 }
 
 /// Case-insensitive, separator-normalised "is `path` inside `dir`".
@@ -561,6 +606,9 @@ pub fn install_plan(
             name: task_xml::INDEX_HELPER_TASK.into(),
             xml: task_xml::index_helper_task(&sid, &facts.exe(INDEX_HELPER_EXE), dir),
         });
+        // Start it now: the logon trigger only fires at the next sign-in,
+        // and an upgrade stopped the running helper.
+        steps.push(Step::RunTask(task_xml::INDEX_HELPER_TASK.into()));
     } else {
         steps.push(Step::DeleteTask(task_xml::INDEX_HELPER_TASK.into()));
     }
@@ -602,7 +650,7 @@ pub fn install_plan(
     ) {
         steps.push(Step::Launch {
             exe: facts.exe(SUPERVISOR_EXE),
-            args: args.into(),
+            args,
         });
     }
     steps
@@ -673,6 +721,7 @@ mod tests {
             user_sid: "S-1-5-21-1-2-3-1001".into(),
             explorer_shell_running: true,
             ours_running: false,
+            ours_other_sessions: 0,
         }
     }
 
@@ -754,9 +803,18 @@ mod tests {
             sid: "S-1-5-21-1-2-3-1001".into()
         }));
         assert!(!p.iter().any(|s| matches!(s, Step::RegisterShell { .. })));
-        assert!(p.iter().any(
-            |s| matches!(s, Step::CreateTask { name, .. } if name == task_xml::INDEX_HELPER_TASK)
-        ));
+        let created = p
+            .iter()
+            .position(
+                |s| matches!(s, Step::CreateTask { name, .. } if name == task_xml::INDEX_HELPER_TASK),
+            )
+            .unwrap();
+        // The helper is started right after it is registered.
+        assert_eq!(
+            p[created + 1],
+            Step::RunTask(task_xml::INDEX_HELPER_TASK.into())
+        );
+        assert!(!p[created + 1].is_fatal());
         assert_eq!(
             p.last(),
             Some(&Step::Launch {
@@ -798,6 +856,7 @@ mod tests {
         let p = plan(&facts(), &c, &[]);
         assert!(p.contains(&Step::DeleteTask(task_xml::INDEX_HELPER_TASK.into())));
         assert!(!p.iter().any(|s| matches!(s, Step::CreateTask { .. })));
+        assert!(!p.iter().any(|s| matches!(s, Step::RunTask(_))));
         assert!(p.contains(&Step::RestoreShell {
             sid: "S-1-5-21-1-2-3-1001".into()
         }));
@@ -817,13 +876,14 @@ mod tests {
         let mut c = choices(StartMode::Shell);
         c.launch = false;
         let p = plan(&f, &c, &[]);
-        assert!(matches!(p.last(), Some(Step::Launch { args, .. }) if args == "--shell"));
+        // A restart, not a new sign-in.
+        assert!(matches!(p.last(), Some(Step::Launch { args, .. }) if args == "--shell --resume"));
         assert!(!p.contains(&Step::StartExplorerIfMissing));
         // Switching to alongside: bring Windows Explorer back, then dev mode.
         let p = plan(&f, &choices(StartMode::Alongside), &[]);
         let n = p.len();
         assert_eq!(p[n - 2], Step::StartExplorerIfMissing);
-        assert!(matches!(&p[n - 1], Step::Launch { args, .. } if args == "--dev"));
+        assert!(matches!(&p[n - 1], Step::Launch { args, .. } if args == "--dev --resume"));
     }
 
     #[test]
@@ -863,13 +923,21 @@ mod tests {
     #[test]
     fn launch_decisions() {
         use StartMode::{Alongside, Shell};
-        assert_eq!(launch_args(Alongside, false, false, true), None);
-        assert_eq!(launch_args(Alongside, true, false, true), Some("--dev"));
-        assert_eq!(launch_args(Alongside, false, true, false), Some("--dev"));
-        assert_eq!(launch_args(Shell, true, false, true), Some("--dev"));
-        assert_eq!(launch_args(Shell, true, false, false), Some("--shell"));
+        let a = |m, l, w, e| launch_args(m, l, w, e);
+        assert_eq!(a(Alongside, false, false, true), None);
+        assert_eq!(a(Alongside, true, false, true).as_deref(), Some("--dev"));
         assert_eq!(
-            launch_args(StartMode::None, true, false, true),
+            a(Alongside, false, true, false).as_deref(),
+            Some("--dev --resume")
+        );
+        assert_eq!(a(Shell, true, false, true).as_deref(), Some("--dev"));
+        assert_eq!(a(Shell, true, false, false).as_deref(), Some("--shell"));
+        assert_eq!(
+            a(Shell, true, true, false).as_deref(),
+            Some("--shell --resume")
+        );
+        assert_eq!(
+            a(StartMode::None, true, false, true).as_deref(),
             Some("--dev")
         );
     }
@@ -965,6 +1033,22 @@ mod tests {
         ];
         let order: Vec<u32> = stop_order(&procs, DIR, 16).iter().map(|p| p.0).collect();
         assert_eq!(order, vec![12, 10, 15]);
+    }
+
+    #[test]
+    fn processes_of_other_sessions_are_left_alone() {
+        let procs = vec![
+            (10, format!(r"{DIR}\explorer-rs.exe"), Some(2)),
+            (11, format!(r"{DIR}\explorer-rs.exe"), Some(3)),
+            (12, format!(r"{DIR}\explorer-rs-taskbar.exe"), None),
+            (13, format!(r"{DIR}\explorer-rs-taskbar.exe"), Some(2)),
+        ];
+        let (mine, other) = split_sessions(&procs, Some(2));
+        assert_eq!(mine.iter().map(|p| p.0).collect::<Vec<_>>(), [10, 13]);
+        assert_eq!(other.iter().map(|p| p.0).collect::<Vec<_>>(), [11, 12]);
+        let (mine, other) = split_sessions(&procs, None);
+        assert_eq!(mine.len(), 4);
+        assert!(other.is_empty());
     }
 
     #[test]

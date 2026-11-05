@@ -115,3 +115,45 @@ pub fn is_elevated() -> bool {
     .is_ok()
         && e.TokenIsElevated != 0
 }
+
+/// Enable a privilege (e.g. `SE_TAKE_OWNERSHIP_NAME`) in this process's
+/// token if the token holds it. Returns false (and logs) on failure.
+pub fn enable_privilege(name: windows::core::PCWSTR) -> bool {
+    use windows::Win32::Foundation::LUID;
+    use windows::Win32::Security::{
+        AdjustTokenPrivileges, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
+        TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES,
+    };
+    // SAFETY: token handle closed below; structures are valid.
+    unsafe {
+        let mut tok = HANDLE::default();
+        if OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            &mut tok,
+        )
+        .is_err()
+        {
+            return false;
+        }
+        let tok = Handle(tok);
+        let mut luid = LUID::default();
+        if LookupPrivilegeValueW(windows::core::PCWSTR::null(), name, &mut luid).is_err() {
+            return false;
+        }
+        let mut tp = TOKEN_PRIVILEGES {
+            PrivilegeCount: 1,
+            ..Default::default()
+        };
+        tp.Privileges[0].Luid = luid;
+        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        match AdjustTokenPrivileges(tok.0, false, Some(&tp), 0, None, None) {
+            // ERROR_NOT_ALL_ASSIGNED is reported through GetLastError.
+            Ok(()) => windows::Win32::Foundation::GetLastError().is_ok(),
+            Err(e) => {
+                tracing::warn!(error = %e, "AdjustTokenPrivileges failed");
+                false
+            }
+        }
+    }
+}

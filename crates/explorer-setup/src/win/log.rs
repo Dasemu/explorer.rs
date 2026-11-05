@@ -1,89 +1,64 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Setup log: `%ProgramData%\explorer-rs\setup.log` (appended).
+//! Setup log: `%ProgramData%\explorer-rs\setup.log` (appended), and the
+//! protected folder itself (see `explorer_win::secdir`).
 //!
 //! `%ProgramData%` lets standard users create folders, so a user could
-//! pre-create `explorer-rs` as a junction and make the elevated installer
-//! write elsewhere. The folder is therefore recreated if it is a reparse
-//! point and gets a protected ACL (SYSTEM and Administrators full control,
-//! Users read) before the log file is opened.
+//! pre-create `explorer-rs` (as a junction, or as a folder they own with
+//! files in it) and make the elevated installer write elsewhere or run a
+//! planted DLL next to the uninstaller copy. Before anything is written
+//! there the folder (and its `logs` subfolder, used by the elevated index
+//! helper) is made a protected folder owned by Administrators; a folder
+//! that was owned by someone else has its contents deleted.
 
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
-use anyhow::{Context, Result};
-use explorer_win::util::WideString;
-use explorer_win::windows::Win32::Foundation::{LocalFree, HLOCAL};
-use explorer_win::windows::Win32::Security::Authorization::{
-    ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW, SDDL_REVISION_1,
-    SE_FILE_OBJECT,
-};
-use explorer_win::windows::Win32::Security::{
-    GetSecurityDescriptorDacl, ACL, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
-    PSECURITY_DESCRIPTOR,
-};
-use explorer_win::windows::Win32::UI::Shell::FOLDERID_ProgramData;
+use anyhow::Result;
+use explorer_win::secdir;
 
-/// SYSTEM + Administrators: full control; Users: read & execute.
-const DIR_SDDL: &str = "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)";
-
-pub fn log_dir() -> Result<PathBuf> {
-    let base = crate::win::sys::known_folder(&FOLDERID_ProgramData)?;
-    Ok(PathBuf::from(base).join(explorer_core::APP_DIR_NAME))
+/// Secure `%ProgramData%\explorer-rs` and its `logs` subfolder once per
+/// run and return the folder. Errors are remembered (never write to an
+/// unprotected folder).
+pub fn secure_data_dir() -> Result<PathBuf> {
+    static DIR: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let secure = || -> Result<PathBuf> {
+            let dir = secdir::program_data_dir()?;
+            if secdir::secure_dir(&dir)? {
+                secdir::wipe_contents(&dir);
+            }
+            let logs = dir.join("logs");
+            if secdir::secure_dir(&logs)? {
+                secdir::wipe_contents(&logs);
+            }
+            Ok(dir)
+        };
+        secure().map_err(|e| format!("{e:#}"))
+    })
+    .clone()
+    .map_err(anyhow::Error::msg)
 }
 
-fn protect_dir(dir: &Path) -> Result<()> {
-    let sddl = WideString::new(DIR_SDDL);
-    let mut sd = PSECURITY_DESCRIPTOR::default();
-    // SAFETY: valid SDDL string; `sd` freed with LocalFree below; the DACL
-    // pointer lives inside `sd`.
-    unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl.pcwstr(),
-            SDDL_REVISION_1,
-            &mut sd,
-            None,
-        )
-        .context("ConvertStringSecurityDescriptorToSecurityDescriptorW")?;
-        let mut present = explorer_win::windows::core::BOOL(0);
-        let mut defaulted = explorer_win::windows::core::BOOL(0);
-        let mut dacl: *mut ACL = std::ptr::null_mut();
-        let r = GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted)
-            .context("GetSecurityDescriptorDacl")
-            .and_then(|_| {
-                let path = WideString::new(&dir.to_string_lossy());
-                SetNamedSecurityInfoW(
-                    path.pcwstr(),
-                    SE_FILE_OBJECT,
-                    DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                    None,
-                    None,
-                    Some(dacl),
-                    None,
-                )
-                .ok()
-                .context("SetNamedSecurityInfoW")
-            });
-        let _ = LocalFree(Some(HLOCAL(sd.0)));
-        r
-    }
+pub fn log_dir() -> Result<PathBuf> {
+    secure_data_dir()
 }
 
 /// Create the protected log folder and start logging to `setup.log`.
 /// Logging failures never stop setup. Returns the log file path.
 pub fn init() -> Option<PathBuf> {
-    let dir = log_dir().ok()?;
-    if let Ok(md) = std::fs::symlink_metadata(&dir) {
-        if md.file_type().is_symlink() || !md.is_dir() {
-            // Not a plain folder we created: remove the link (not its target).
-            let _ = std::fs::remove_dir(&dir).or_else(|_| std::fs::remove_file(&dir));
-        }
-    }
-    std::fs::create_dir_all(&dir).ok()?;
-    if let Err(e) = protect_dir(&dir) {
-        // Without a protected folder do not write an elevated log there.
-        eprintln!("setup log disabled: {e:#}");
+    if !explorer_win::security::is_elevated() {
+        // Never create the folder unelevated: it would be owned by the
+        // user (and wiped by the next elevated run).
         return None;
     }
+    let dir = match secure_data_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            // Without a protected folder do not write an elevated log there.
+            eprintln!("setup log disabled: {e:#}");
+            return None;
+        }
+    };
     let path = dir.join("setup.log");
     if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
         let _ = std::fs::remove_file(&path);

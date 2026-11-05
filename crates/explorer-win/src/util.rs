@@ -74,3 +74,21 @@ impl Drop for ComApartment {
         }
     }
 }
+
+/// Path of a known folder (e.g. `FOLDERID_ProgramData`), without a
+/// trailing backslash.
+pub fn known_folder(id: &windows::core::GUID) -> anyhow::Result<String> {
+    use anyhow::Context;
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+    // SAFETY: the returned buffer is freed with CoTaskMemFree.
+    unsafe {
+        let p = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None).context("SHGetKnownFolderPath")?;
+        let s = p.to_string().unwrap_or_default();
+        CoTaskMemFree(Some(p.0 as *const _));
+        if s.is_empty() {
+            anyhow::bail!("empty known folder path");
+        }
+        Ok(s.trim_end_matches('\\').to_string())
+    }
+}

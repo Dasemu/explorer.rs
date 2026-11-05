@@ -38,7 +38,7 @@ pub enum Method {
 /// Start `exe args` unelevated as the interactive user `sid`. COM must be
 /// initialised (STA) on this thread.
 pub fn start_unelevated(exe: &str, args: &str, work_dir: &str, sid: &str) -> Result<Method> {
-    if crate::win::sys::explorer_shell_running() {
+    if explorer_win::process::explorer_shell_running() {
         match via_explorer(exe, args, work_dir) {
             Ok(()) => return Ok(Method::Explorer),
             Err(e) => {
@@ -91,7 +91,11 @@ fn via_explorer(exe: &str, args: &str, work_dir: &str) -> Result<()> {
 
 fn via_task(exe: &str, args: &str, work_dir: &str, sid: &str) -> Result<()> {
     let xml = task_xml::launch_task(sid, exe, args, work_dir);
-    explorer_win::sched::create_from_xml(task_xml::LAUNCH_TASK, &task_xml::to_utf16_file(&xml))?;
+    explorer_win::sched::create_from_xml(
+        task_xml::LAUNCH_TASK,
+        &task_xml::to_utf16_file(&xml),
+        &crate::win::log::secure_data_dir()?,
+    )?;
     explorer_win::sched::run_now(task_xml::LAUNCH_TASK)?;
     tracing::info!(exe, args, "started through the launch task");
     Ok(())
