@@ -458,10 +458,7 @@ pub type SessionProcess = (u32, String, Option<u32>);
 /// stopped). A process whose session is unknown is treated as foreign; if
 /// the current session is unknown, everything counts as current (the old
 /// behaviour).
-pub fn split_sessions(
-    procs: &[SessionProcess],
-    current: Option<u32>,
-) -> (ProcList, ProcList) {
+pub fn split_sessions(procs: &[SessionProcess], current: Option<u32>) -> (ProcList, ProcList) {
     let mut mine = Vec::new();
     let mut other = Vec::new();
     for (pid, path, session) in procs {
