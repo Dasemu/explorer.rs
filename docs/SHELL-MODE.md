@@ -49,7 +49,9 @@ Every launch is logged in `supervisor.*.log`. Not processed: `HKLM\...\RunOnce`
 (Windows runs those itself). Nothing of this runs in `--dev` mode.
 
 A restarted supervisor (crash, `Ctrl+Alt+Shift+R`) does **not** run startup
-apps again.
+apps again, nor does explorer.rs restarted by setup after an upgrade
+(`--shell --resume`). Startup apps are not in explorer.rs's job object, so
+they keep running when explorer.rs restarts.
 
 ### Draws the desktop background
 `explorer-rs-desktop.exe` paints your wallpaper on every monitor using your
