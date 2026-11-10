@@ -240,22 +240,70 @@ impl Hive {
     }
 }
 
-/// SID of the user owning the interactive desktop (the process that owns
-/// the shell window, else this process). From an elevated installer this
-/// is the signed-in user even when elevation used another account.
+/// SID of the interactive (signed-in) user. From an elevated installer
+/// this is the signed-in user even when elevation used another account.
+/// Fallback chain:
+/// 1. owner of the shell window (`GetShellWindow`);
+/// 2. owner of a `Shell_TrayWnd` window (Explorer's or our taskbar's);
+/// 3. user of an explorer.exe / explorer-rs.exe process in the active
+///    console session;
+/// 4. this process's own user (a warning is logged when elevated: it may
+///    be the administrator who approved elevation, not the signed-in user).
 pub fn interactive_user_sid() -> Option<String> {
-    use windows::Win32::UI::WindowsAndMessaging::{GetShellWindow, GetWindowThreadProcessId};
-    // SAFETY: plain queries.
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, GetShellWindow};
+    let sid_of_window = |h: windows::Win32::Foundation::HWND| -> Option<String> {
+        let pid = crate::process::window_pid(h);
+        (pid != 0)
+            .then(|| crate::security::process_user_sid(pid).ok())
+            .flatten()
+    };
+    // SAFETY: plain query.
     let shell = unsafe { GetShellWindow() };
     if !shell.is_invalid() {
-        let mut pid = 0u32;
-        // SAFETY: valid out-pointer.
-        unsafe { GetWindowThreadProcessId(shell, Some(&mut pid)) };
-        if pid != 0 {
-            if let Ok(sid) = crate::security::process_user_sid(pid) {
+        if let Some(sid) = sid_of_window(shell) {
+            return Some(sid);
+        }
+    }
+    let class = crate::util::WideString::new(crate::tray::TRAY_WINDOW_CLASS);
+    // SAFETY: valid class string.
+    if let Ok(tray) = unsafe { FindWindowExW(None, None, class.pcwstr(), None) } {
+        if !tray.is_invalid() {
+            if let Some(sid) = sid_of_window(tray) {
+                tracing::info!("interactive user taken from the tray window owner");
                 return Some(sid);
             }
         }
     }
-    crate::security::current_user_sid().ok()
+    if let Some(sid) = console_session_user() {
+        tracing::info!("interactive user taken from a shell process of the console session");
+        return Some(sid);
+    }
+    let own = crate::security::current_user_sid().ok();
+    if crate::security::is_elevated() {
+        tracing::warn!(
+            sid = ?own,
+            "could not find the signed-in user; using this (elevated) process's own user"
+        );
+    }
+    own
+}
+
+/// User of an explorer.exe or explorer-rs.exe process in the active console
+/// session.
+fn console_session_user() -> Option<String> {
+    use windows::Win32::System::RemoteDesktop::WTSGetActiveConsoleSessionId;
+    // SAFETY: plain query.
+    let console = unsafe { WTSGetActiveConsoleSessionId() };
+    if console == u32::MAX {
+        return None;
+    }
+    let mut candidates: Vec<(u8, u32)> = crate::process::all_processes()
+        .into_iter()
+        .filter(|p| crate::process::session_of(p.pid) == Some(console))
+        .filter_map(|p| Some((explorer_core::shellreg::shell_process_rank(&p.exe)?, p.pid)))
+        .collect();
+    candidates.sort();
+    candidates
+        .into_iter()
+        .find_map(|(_, pid)| crate::security::process_user_sid(pid).ok())
 }

@@ -1,96 +1,188 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Windows implementation of the taskbar.
 //!
-//! Structure (all on one UI thread):
+//! Structure (all windows on one UI thread):
 //! - a hidden **controller** window owns the [`TaskbarModel`], receives
 //!   shell-hook / WinEvent notifications, the Win-key signal, timers,
-//!   theme and display changes, and owns the bar windows and the tray host;
-//! - one **bar** window per monitor: an AppBar that paints the model and
-//!   handles mouse input. The tray is shown on the primary monitor's bar.
+//!   theme, power and display changes, worker results, and owns the bar
+//!   windows and the tray host;
+//! - one **bar** window per monitor ([`crate::bar`]): an AppBar that paints
+//!   pinned and running apps (grouped per app), the tray, the system glyphs
+//!   and the clock, and handles mouse input. The tray is shown on the
+//!   primary monitor's bar;
+//! - one **flyout** window ([`crate::flyout`]) reused for every popup:
+//!   window picker / hover thumbnails, "…" overflow, tray overflow, Quick
+//!   settings and the calendar;
+//! - worker threads ([`crate::workers`]) for icons, the app catalog and the
+//!   system status.
 //!
 //! Shared state lives in an `Rc<Shared>` with `RefCell`s that are only
-//! borrowed for short, non-reentrant sections.
+//! borrowed for short, non-reentrant sections (never across calls that can
+//! dispatch messages to our own windows).
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
-use explorer_core::clock;
-use explorer_core::config::{Alignment, Config, Edge, MonitorSelection};
+use explorer_core::calendar;
+use explorer_core::catalog::{Catalog, LaunchTarget};
+use explorer_core::clock::{self, DateTime};
+use explorer_core::config::{Alignment, Config, MonitorSelection};
+use explorer_core::i18n::Lang;
 use explorer_core::image::SharedImage;
 use explorer_core::ipc::{LauncherCommand, RunMode, TASKBAR_WINDOW_CLASS};
-use explorer_core::layout::{bar_layout, BarHit, BarLayout, BarSpec, Rect};
 use explorer_core::paths::AppPaths;
-use explorer_core::supervisor::{EXIT_RESTART, EXIT_SHUTDOWN_ALL};
-use explorer_core::taskbar_model::{Button, ClickAction, TaskbarModel, WindowEvent};
+use explorer_core::shellpath::{file_stem, looks_like_path, same_path, KnownFolders};
+use explorer_core::start::{Pins, DEFAULT_TASKBAR_PIN_IDS};
+use explorer_core::taskbar_groups::{
+    build_buttons, AppButton, PinnedApp, ShowDesktop, ShowDesktopAction, WindowIdent,
+};
+use explorer_core::taskbar_model::{TaskbarModel, WindowEvent};
 use explorer_core::theme::Palette;
-use explorer_core::tray::{IconKey, TrayButton};
+use explorer_core::tray_promotion::NotifySetting;
 use explorer_core::window_filter::FilterRules;
-use explorer_win::appbar::{AppBar, ABN_FULLSCREENAPP, ABN_POSCHANGED};
-use explorer_win::gfx::{Align, Color, Gfx, Surface};
+use explorer_win::gfx::Gfx;
 use explorer_win::keyboard::{WinKeyHook, WM_APP_WINKEY};
-use explorer_win::monitors::{self, Monitor};
+use explorer_win::monitors;
 use explorer_win::shellhook::{self, events as ev, ShellHooks, WM_APP_WINEVENT};
-use explorer_win::tooltip::Tooltip;
 use explorer_win::tray::{TrayHost, WM_APP_TRAY_CHANGED};
-use explorer_win::util::{hwnd_to_u64, u64_to_hwnd, wide, ComApartment};
+use explorer_win::util::{hwnd_to_u64, u64_to_hwnd, ComApartment};
 use explorer_win::window::{self, CreateParams, Handler};
-use explorer_win::windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use explorer_win::windows::Win32::Graphics::Gdi::{
-    BeginPaint, ClientToScreen, EndPaint, InvalidateRect, MonitorFromWindow,
-    MONITOR_DEFAULTTONEAREST, PAINTSTRUCT,
-};
-use explorer_win::windows::Win32::System::Shutdown::{ExitWindowsEx, EWX_LOGOFF, SHUTDOWN_REASON};
-use explorer_win::windows::Win32::UI::Input::KeyboardAndMouse::{
-    TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
-};
+use explorer_win::windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use explorer_win::windows::Win32::Graphics::Gdi::InvalidateRect;
 use explorer_win::windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, DestroyWindow, GetClientRect, GetCursorPos,
-    KillTimer, PostMessageW, SetTimer, SetWindowPos, TrackPopupMenu, HWND_NOTOPMOST, HWND_TOPMOST,
-    MA_NOACTIVATE, MF_SEPARATOR, MF_STRING, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_ACTIVATE, WM_APP, WM_CREATE, WM_DESTROY,
-    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_MOUSEACTIVATE,
-    WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_SIZE, WM_TIMER, WM_WINDOWPOSCHANGED,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    DestroyWindow, KillTimer, PostMessageW, SetTimer, ShowWindowAsync, SW_MINIMIZE, SW_RESTORE,
+    WM_APP, WM_CLOSE, WM_DESTROY, WM_DISPLAYCHANGE, WM_POWERBROADCAST, WM_SETTINGCHANGE, WM_TIMER,
+    WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
+use crate::bar::Bar;
+use crate::flyout;
+use crate::workers::{
+    CatalogApp, ShellDone, ShellJob, ShellWorker, SysCmd, SysStatus, SysWorker, WM_APP_SHELL_DONE,
+    WM_APP_SYS_CHANGED,
+};
 use crate::Args;
 
 const CONTROLLER_CLASS: &str = "ExplorerRs.TaskbarController";
 
 const WM_APP_INIT: u32 = WM_APP + 1;
-const WM_APP_APPBAR: u32 = WM_APP + 2;
-const WM_APP_POSITION: u32 = WM_APP + 3;
-
-/// WinUser.h value; not exported by the `windows` crate module we use.
-const WM_MOUSELEAVE: u32 = 0x02A3;
 
 const TIMER_CLOCK: usize = 1;
 const TIMER_RESYNC: usize = 2;
 const TIMER_REBUILD: usize = 3;
+/// Hover-thumbnail ("peek") leave detection while it is visible.
+pub(crate) const TIMER_PEEK: usize = 4;
 
 /// Full re-enumeration interval: a safety net for missed notifications.
 const RESYNC_MS: u32 = 30_000;
+/// Re-read a window's AppUserModelID at most this often (apps such as
+/// Chrome set it shortly after creating the window).
+const IDENT_REFRESH: Duration = Duration::from_secs(2);
+/// Re-enumerate shell:AppsFolder (new installs) this often.
+const CATALOG_REFRESH: Duration = Duration::from_secs(15 * 60);
+/// After a "Show desktop" minimize, activations within this window are
+/// part of the minimize sequence, not the user restoring a window.
+const SHOW_DESKTOP_SETTLE: Duration = Duration::from_millis(1500);
 
-/// Window icons are fetched once at this size and scaled when drawn.
-const WINDOW_ICON_PX: u32 = 48;
+/// Identity of one window (see `explorer_core::taskbar_groups`).
+pub(crate) struct WinIdent {
+    pub app_id: Option<String>,
+    pub exe: Option<String>,
+    pub app_name: Option<String>,
+    checked: Instant,
+}
 
-struct Shared {
-    gfx: Gfx,
-    config: Config,
-    mode: RunMode,
-    model: RefCell<TaskbarModel>,
-    clock_text: RefCell<(String, String, String)>,
-    bars: RefCell<Vec<HWND>>,
-    palette: Cell<Palette>,
-    centered: Cell<bool>,
-    window_icons: RefCell<HashMap<u64, Option<SharedImage>>>,
-    tray: RefCell<Option<TrayHost>>,
+/// The taskbar pins file, re-read when its modification time changes (the
+/// Start menu writes it too).
+pub(crate) struct PinStore {
+    pub pins: Pins,
+    path: PathBuf,
+    mtime: Option<SystemTime>,
+}
+
+fn mtime(p: &std::path::Path) -> Option<SystemTime> {
+    std::fs::metadata(p).and_then(|m| m.modified()).ok()
+}
+
+impl PinStore {
+    fn load(path: PathBuf) -> Self {
+        Self {
+            pins: Pins::load(&path),
+            mtime: mtime(&path),
+            path,
+        }
+    }
+
+    /// Returns true if the file changed and was re-read. A file that could
+    /// not be read keeps the pins in memory and is retried next time.
+    pub fn reload_if_changed(&mut self) -> bool {
+        let m = mtime(&self.path);
+        if m != self.mtime || self.pins.unreadable {
+            match self.pins.reload(&self.path) {
+                explorer_core::start::Reload::Retry => false,
+                _ => {
+                    self.mtime = mtime(&self.path);
+                    true
+                }
+            }
+        } else {
+            false
+        }
+    }
+
+    pub fn save(&mut self) {
+        self.pins.retry_if_unreadable(&self.path);
+        if let Err(e) = self.pins.save(&self.path) {
+            tracing::warn!(error = %e, path = %self.path.display(), "cannot save taskbar pins");
+        }
+        self.mtime = mtime(&self.path);
+    }
+}
+
+pub(crate) struct Shared {
+    pub gfx: Gfx,
+    pub config: Config,
+    pub mode: RunMode,
+    pub lang: Lang,
+    pub folders: KnownFolders,
+    pub model: RefCell<TaskbarModel>,
+    pub idents: RefCell<HashMap<u64, WinIdent>>,
+    /// (time, date) lines of the clock.
+    pub clock_text: RefCell<(String, String)>,
+    pub now: Cell<Option<DateTime>>,
+    pub bars: RefCell<Vec<HWND>>,
+    pub palette: Cell<Palette>,
+    pub centered: Cell<bool>,
+    pub window_icons: RefCell<HashMap<u64, Option<SharedImage>>>,
+    /// Icons of pinned apps by pin key.
+    pub app_icons: RefCell<HashMap<String, Option<SharedImage>>>,
+    pub tray: RefCell<Option<TrayHost>>,
+    pub tray_settings: RefCell<Vec<NotifySetting>>,
+    /// Tray owner window -> process image path.
+    pub tray_exe: RefCell<HashMap<u32, Option<String>>>,
+    pub pins: RefCell<PinStore>,
+    /// Pins resolved against the catalog, in display order.
+    pub pinned: RefCell<Vec<PinnedApp>>,
+    pub catalog: RefCell<Option<Vec<CatalogApp>>>,
+    catalog_at: Cell<Option<Instant>>,
+    /// `.lnk` path (lower case) -> target executable.
+    links: RefCell<HashMap<String, Option<String>>>,
+    pub shell: RefCell<Option<ShellWorker>>,
+    pub sys: RefCell<Option<SysWorker>>,
+    pub sys_status: RefCell<SysStatus>,
+    pub flyout: RefCell<Option<flyout::State>>,
+    pub flyout_hwnd: Cell<HWND>,
+    pub flyout_closed: RefCell<Option<(flyout::Opener, Instant)>>,
+    show_desktop: RefCell<ShowDesktop>,
+    show_desktop_at: Cell<Option<Instant>>,
+    pub controller: Cell<HWND>,
 }
 
 impl Shared {
-    fn invalidate_bars(&self) {
+    pub fn invalidate_bars(&self) {
         for &b in self.bars.borrow().iter() {
             // SAFETY: repaint request on our own window.
             let _ = unsafe { InvalidateRect(Some(b), None, false) };
@@ -103,15 +195,24 @@ impl Shared {
         let next = (
             clock::format(&t.clock_format, &now),
             clock::format(&t.date_format, &now),
-            clock::format("%a %d %b %Y", &now),
         );
+        let day_changed = self.now.get().is_none_or(|p| p.day != now.day);
+        self.now.set(Some(now));
         let mut cur = self.clock_text.borrow_mut();
-        if *cur != next {
+        if *cur != next || day_changed {
             *cur = next;
             true
         } else {
             false
         }
+    }
+
+    /// Full date for the clock tooltip.
+    pub fn long_date(&self) -> String {
+        self.now
+            .get()
+            .map(|n| calendar::long_date(self.lang, &n))
+            .unwrap_or_default()
     }
 
     /// Re-read theme and alignment. Returns true if anything changed.
@@ -131,9 +232,57 @@ impl Shared {
         changed
     }
 
-    /// Fetch icons for buttons that have none yet; drop icons of windows
-    /// that are gone.
-    fn refresh_window_icons(&self) {
+    fn shell_job(&self, job: ShellJob) {
+        if let Some(w) = self.shell.borrow().as_ref() {
+            w.send(job);
+        }
+    }
+
+    pub fn sys_cmd(&self, cmd: SysCmd) {
+        if let Some(w) = self.sys.borrow().as_ref() {
+            w.send(cmd);
+        }
+    }
+
+    // -- identities ---------------------------------------------------------
+
+    fn catalog_match(&self, app_id: Option<&str>, exe: Option<&str>) -> Option<CatalogApp> {
+        let cat = self.catalog.borrow();
+        let cat = cat.as_ref()?;
+        if let Some(id) = app_id {
+            let l = id.to_lowercase();
+            if let Some(c) = cat
+                .iter()
+                .find(|c| c.app_id.as_deref().is_some_and(|a| a.to_lowercase() == l))
+            {
+                return Some(c.clone());
+            }
+        }
+        let exe = exe?;
+        cat.iter()
+            .find(|c| c.exe.as_deref().is_some_and(|e| same_path(e, exe)))
+            .cloned()
+    }
+
+    fn compute_ident(&self, hwnd: u64) -> WinIdent {
+        let h = u64_to_hwnd(hwnd);
+        let app_id = explorer_win::icons::window_app_id(h);
+        let exe = explorer_win::winlist::process_path(explorer_win::winlist::process_id(h));
+        let app_name = self
+            .catalog_match(app_id.as_deref(), exe.as_deref())
+            .map(|c| c.entry.name);
+        WinIdent {
+            app_id,
+            exe,
+            app_name,
+            checked: Instant::now(),
+        }
+    }
+
+    /// Make sure every window in the model has an identity and an icon
+    /// request; drop data of windows that are gone. `force` re-reads all
+    /// identities (periodic resync).
+    fn refresh_idents(&self, force: bool) {
         let hwnds: Vec<u64> = self
             .model
             .borrow()
@@ -141,15 +290,306 @@ impl Shared {
             .iter()
             .map(|b| b.hwnd)
             .collect();
+        let stale: Vec<u64> = {
+            let idents = self.idents.borrow();
+            hwnds
+                .iter()
+                .copied()
+                .filter(|h| {
+                    idents.get(h).is_none_or(|i| {
+                        force || i.checked.elapsed() > IDENT_REFRESH && i.app_id.is_none()
+                    })
+                })
+                .collect()
+        };
+        let fresh: Vec<(u64, WinIdent)> =
+            stale.iter().map(|&h| (h, self.compute_ident(h))).collect();
+        {
+            let mut idents = self.idents.borrow_mut();
+            idents.retain(|h, _| hwnds.contains(h));
+            idents.extend(fresh);
+        }
         let mut icons = self.window_icons.borrow_mut();
         icons.retain(|h, _| hwnds.contains(h));
         for h in hwnds {
             if let std::collections::hash_map::Entry::Vacant(e) = icons.entry(h) {
-                e.insert(explorer_win::icons::for_window(
-                    u64_to_hwnd(h),
-                    WINDOW_ICON_PX,
-                ));
+                e.insert(None);
+                self.shell_job(ShellJob::WindowIcon(h));
             }
+        }
+    }
+
+    /// Windows (in taskbar order) passing `keep`, with their identities.
+    pub fn window_idents(&self, keep: impl Fn(u64) -> bool) -> Vec<WindowIdent> {
+        let model = self.model.borrow();
+        let idents = self.idents.borrow();
+        model
+            .buttons()
+            .iter()
+            .filter(|b| keep(b.hwnd))
+            .map(|b| {
+                let id = idents.get(&b.hwnd);
+                WindowIdent {
+                    hwnd: b.hwnd,
+                    title: b.title.clone(),
+                    app_id: id.and_then(|i| i.app_id.clone()),
+                    exe_path: id.and_then(|i| i.exe.clone()),
+                    app_name: id.and_then(|i| i.app_name.clone()),
+                    flashing: b.flashing,
+                }
+            })
+            .collect()
+    }
+
+    /// Buttons for windows passing `keep`.
+    pub fn buttons(&self, keep: impl Fn(u64) -> bool) -> Vec<AppButton> {
+        let idents = self.window_idents(keep);
+        let active = self.model.borrow().active();
+        build_buttons(
+            &self.pinned.borrow(),
+            &idents,
+            active,
+            self.config.taskbar.combine,
+        )
+    }
+
+    pub fn window_title(&self, hwnd: u64) -> Option<String> {
+        self.model
+            .borrow()
+            .buttons()
+            .iter()
+            .find(|b| b.hwnd == hwnd)
+            .map(|b| b.title.clone())
+    }
+
+    pub fn button_icon(&self, b: &AppButton) -> Option<SharedImage> {
+        if let Some(i) = b.pin {
+            let key = self.pinned.borrow().get(i).map(|p| p.key.clone());
+            if let Some(Some(img)) = key.and_then(|k| self.app_icons.borrow().get(&k).cloned()) {
+                return Some(img);
+            }
+        }
+        let icons = self.window_icons.borrow();
+        b.windows
+            .iter()
+            .find_map(|w| icons.get(w).cloned().flatten())
+    }
+
+    pub fn window_icon(&self, hwnd: u64) -> Option<SharedImage> {
+        self.window_icons.borrow().get(&hwnd).cloned().flatten()
+    }
+
+    // -- pins ---------------------------------------------------------------
+
+    /// Resolve the pin keys against the catalog (and resolved shortcuts).
+    fn rebuild_pinned(&self) {
+        let keys = self.pins.borrow().pins.keys.clone();
+        let mut out = Vec::new();
+        let mut missing_links = Vec::new();
+        {
+            let catalog = self.catalog.borrow();
+            let links = self.links.borrow();
+            for key in keys {
+                if let Some(c) = catalog
+                    .as_ref()
+                    .and_then(|cat| cat.iter().find(|c| c.entry.target.key() == key))
+                {
+                    out.push(PinnedApp {
+                        key,
+                        name: c.entry.name.clone(),
+                        target: c.entry.target.clone(),
+                        app_id: c.app_id.clone(),
+                        exe_path: c.exe.clone(),
+                    });
+                    continue;
+                }
+                let Some(path) = key.strip_prefix("path:").map(str::to_string) else {
+                    // An AppsFolder pin not (or not yet) in the catalog:
+                    // shown once the catalog lists it (uninstalled apps
+                    // stay hidden, like the Start menu).
+                    continue;
+                };
+                let lower = path.to_ascii_lowercase();
+                let exe = if lower.ends_with(".exe") {
+                    Some(path.clone())
+                } else {
+                    match links.get(&lower) {
+                        Some(t) => t.clone(),
+                        None => {
+                            missing_links.push(path.clone());
+                            None
+                        }
+                    }
+                };
+                let stem = file_stem(&path);
+                let mut name: Vec<char> = stem.chars().collect();
+                if let Some(c) = name.first_mut() {
+                    *c = c.to_uppercase().next().unwrap_or(*c);
+                }
+                out.push(PinnedApp {
+                    key,
+                    name: name.into_iter().collect(),
+                    target: LaunchTarget::Path(path.into()),
+                    app_id: None,
+                    exe_path: exe,
+                });
+            }
+        }
+        if !missing_links.is_empty() {
+            {
+                let mut links = self.links.borrow_mut();
+                for l in &missing_links {
+                    links.insert(l.to_ascii_lowercase(), None);
+                }
+            }
+            self.shell_job(ShellJob::Links(missing_links));
+        }
+        {
+            let mut icons = self.app_icons.borrow_mut();
+            for p in &out {
+                if !icons.contains_key(&p.key) {
+                    icons.insert(p.key.clone(), None);
+                    self.shell_job(ShellJob::TargetIcon(p.key.clone(), p.target.clone()));
+                }
+            }
+        }
+        *self.pinned.borrow_mut() = out;
+    }
+
+    /// Target that starts a new instance of the app behind `b`.
+    pub fn launch_target(&self, b: &AppButton) -> Option<LaunchTarget> {
+        if let Some(i) = b.pin {
+            return self.pinned.borrow().get(i).map(|p| p.target.clone());
+        }
+        let w = *b.windows.first()?;
+        let (app_id, exe) = {
+            let idents = self.idents.borrow();
+            let id = idents.get(&w)?;
+            (id.app_id.clone(), id.exe.clone())
+        };
+        if let Some(c) = self.catalog_match(app_id.as_deref(), exe.as_deref()) {
+            return Some(c.entry.target);
+        }
+        if let Some(a) = app_id.filter(|a| !looks_like_path(a)) {
+            return Some(LaunchTarget::AppsFolder(a));
+        }
+        exe.map(|e| LaunchTarget::Path(e.into()))
+    }
+
+    pub fn launch_new(&self, b: &AppButton) {
+        match self.launch_target(b) {
+            Some(t) => crate::workers::launch(t),
+            None => tracing::warn!(name = %b.name, "no launch target for this app"),
+        }
+    }
+
+    /// Pin (or unpin) the app behind `b`; persisted immediately.
+    pub fn set_pinned(&self, b: &AppButton, pin: bool) {
+        let unpin_key = b
+            .pin
+            .and_then(|i| self.pinned.borrow().get(i).map(|p| p.key.clone()));
+        let target = if pin { self.launch_target(b) } else { None };
+        {
+            let mut store = self.pins.borrow_mut();
+            store.reload_if_changed();
+            let changed = match (pin, target, unpin_key) {
+                (true, Some(t), _) => store.pins.pin(&t),
+                (false, _, Some(k)) => {
+                    store.pins.initialized = true;
+                    let before = store.pins.keys.len();
+                    store.pins.keys.retain(|x| x != &k);
+                    before != store.pins.keys.len()
+                }
+                _ => false,
+            };
+            if changed {
+                store.save();
+            }
+        }
+        self.rebuild_pinned();
+        self.invalidate_bars();
+    }
+
+    /// Persist a new pin order after a drag.
+    pub fn reorder_pins(&self, visible: &[String], from: usize, slot: usize) {
+        let changed = {
+            let mut store = self.pins.borrow_mut();
+            store.reload_if_changed();
+            let changed = explorer_core::taskbar_groups::reorder_pins(
+                &mut store.pins.keys,
+                visible,
+                from,
+                slot,
+            );
+            if changed {
+                store.pins.initialized = true;
+                store.save();
+            }
+            changed
+        };
+        if changed {
+            self.rebuild_pinned();
+        }
+        self.invalidate_bars();
+    }
+
+    // -- show desktop -------------------------------------------------------
+
+    pub fn toggle_show_desktop(&self) {
+        let visible: Vec<u64> = {
+            let model = self.model.borrow();
+            explorer_win::winlist::top_level_windows()
+                .into_iter()
+                .map(hwnd_to_u64)
+                .filter(|h| model.buttons().iter().any(|b| b.hwnd == *h))
+                .filter(|&h| !explorer_win::winlist::is_minimized(u64_to_hwnd(h)))
+                .collect()
+        };
+        let action = self.show_desktop.borrow_mut().toggle(&visible);
+        self.show_desktop_at.set(Some(Instant::now()));
+        match action {
+            ShowDesktopAction::Minimize(list) => {
+                for h in list {
+                    // SAFETY: asynchronous show request; never blocks.
+                    let _ = unsafe { ShowWindowAsync(u64_to_hwnd(h), SW_MINIMIZE) };
+                }
+            }
+            ShowDesktopAction::Restore(list) => {
+                for &h in &list {
+                    // SAFETY: as above.
+                    let _ = unsafe { ShowWindowAsync(u64_to_hwnd(h), SW_RESTORE) };
+                }
+                if let Some(&top) = list.last() {
+                    explorer_win::activate::activate(u64_to_hwnd(top));
+                }
+            }
+        }
+    }
+
+    // -- tray ---------------------------------------------------------------
+
+    /// Process image path of a tray icon's owner window (cached).
+    pub fn tray_owner_exe(&self, hwnd: u32) -> Option<String> {
+        if let Some(v) = self.tray_exe.borrow().get(&hwnd) {
+            return v.clone();
+        }
+        let h = u64_to_hwnd(hwnd as i32 as isize as u64);
+        let exe = explorer_win::winlist::process_path(explorer_win::winlist::process_id(h));
+        self.tray_exe.borrow_mut().insert(hwnd, exe.clone());
+        exe
+    }
+
+    fn reload_tray_settings(&self) -> bool {
+        if self.config.tray.show_all {
+            return false;
+        }
+        let next = explorer_win::appident::notify_settings(&self.folders);
+        let mut cur = self.tray_settings.borrow_mut();
+        if *cur != next {
+            *cur = next;
+            true
+        } else {
+            false
         }
     }
 }
@@ -190,6 +630,7 @@ pub fn run(args: Args) -> i32 {
         return 0;
     };
 
+    window::init_component();
     let mode = RunMode::from_env();
     tracing::info!(mode = mode.as_str(), "taskbar starting");
     let gfx = match Gfx::new() {
@@ -199,12 +640,16 @@ pub fn run(args: Args) -> i32 {
             return 1;
         }
     };
+    let lang = explorer_win::theme::ui_lang(config.general.language);
     let shared = Rc::new(Shared {
         gfx,
         model: RefCell::new(TaskbarModel::new(FilterRules::from_config(&config.taskbar))),
-        config,
+        lang,
         mode,
+        folders: explorer_win::appident::known_folders(),
+        idents: RefCell::new(HashMap::new()),
         clock_text: RefCell::new(Default::default()),
+        now: Cell::new(None),
         bars: RefCell::new(Vec::new()),
         palette: Cell::new(Palette::from_system(
             &Default::default(),
@@ -212,12 +657,31 @@ pub fn run(args: Args) -> i32 {
         )),
         centered: Cell::new(true),
         window_icons: RefCell::new(HashMap::new()),
+        app_icons: RefCell::new(HashMap::new()),
         tray: RefCell::new(None),
+        tray_settings: RefCell::new(Vec::new()),
+        tray_exe: RefCell::new(HashMap::new()),
+        pins: RefCell::new(PinStore::load(paths.taskbar_pins_file())),
+        pinned: RefCell::new(Vec::new()),
+        catalog: RefCell::new(None),
+        catalog_at: Cell::new(None),
+        links: RefCell::new(HashMap::new()),
+        shell: RefCell::new(None),
+        sys: RefCell::new(None),
+        sys_status: RefCell::new(SysStatus::default()),
+        flyout: RefCell::new(None),
+        flyout_hwnd: Cell::new(HWND::default()),
+        flyout_closed: RefCell::new(None),
+        show_desktop: RefCell::new(ShowDesktop::default()),
+        show_desktop_at: Cell::new(None),
+        controller: Cell::new(HWND::default()),
+        config,
     });
     shared.reload_appearance();
 
     window::register_class(CONTROLLER_CLASS, None);
     window::register_class(TASKBAR_WINDOW_CLASS, None);
+    flyout::register_class();
 
     let controller = match window::create(
         CreateParams {
@@ -243,13 +707,16 @@ pub fn run(args: Args) -> i32 {
             return 1;
         }
     };
+    shared.controller.set(controller);
     // SAFETY: posting to our own window.
     let _ = unsafe { PostMessageW(Some(controller), WM_APP_INIT, WPARAM(0), LPARAM(0)) };
 
-    let code = window::run_message_loop(|_| false);
-    // Drop the tray (and its window) before COM goes away.
+    let loop_code = window::run_message_loop(|_| false);
+    // Release thumbnails and the tray (and its window) before COM goes away.
+    shared.flyout.borrow_mut().take();
     shared.tray.borrow_mut().take();
-    tracing::info!(code, "taskbar exiting");
+    let code = window::exit_code();
+    tracing::info!(code, loop_code, "taskbar exiting");
     code
 }
 
@@ -268,9 +735,11 @@ struct Controller {
 
 impl Controller {
     fn rebuild_bars(&mut self) {
+        flyout::close(&self.shared);
         let old: Vec<HWND> = self.shared.bars.borrow_mut().drain(..).collect();
         for b in old {
-            // SAFETY: destroying our own windows.
+            // SAFETY: destroying our own windows (from the controller, never
+            // from inside the bar's own handler).
             let _ = unsafe { DestroyWindow(b) };
         }
         let mut mons = monitors::all();
@@ -279,34 +748,7 @@ impl Controller {
         }
         for m in mons {
             tracing::info!(monitor = %m.describe(), "creating bar");
-            let thickness = thickness(&self.shared.config, m.dpi);
-            let rect = explorer_win::appbar::bar_rect(
-                m.rect,
-                self.shared.config.taskbar.position,
-                thickness,
-            );
-            let res = window::create(
-                CreateParams {
-                    class: TASKBAR_WINDOW_CLASS,
-                    title: "explorer.rs taskbar",
-                    style: WS_POPUP,
-                    ex_style: WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-                    rect,
-                    parent: None,
-                },
-                Box::new(Bar {
-                    shared: self.shared.clone(),
-                    primary: m.primary,
-                    monitor: m,
-                    appbar: None,
-                    surface: None,
-                    layout: None,
-                    hover: BarHit::Empty,
-                    tracking: false,
-                    tooltip: None,
-                }),
-            );
-            match res {
+            match Bar::create(self.shared.clone(), m) {
                 Ok(h) => self.shared.bars.borrow_mut().push(h),
                 Err(e) => tracing::error!(error = %e, "cannot create bar window"),
             }
@@ -314,19 +756,46 @@ impl Controller {
     }
 
     fn changed(&mut self) {
-        self.shared.refresh_window_icons();
+        self.shared.refresh_idents(false);
         self.shared.invalidate_bars();
+        flyout::refresh(&self.shared);
     }
 
     fn resync(&mut self) {
         let snaps = explorer_win::winlist::snapshot_all();
-        if self.shared.model.borrow_mut().reset(snaps) {
+        let changed = self.shared.model.borrow_mut().reset(snaps);
+        self.shared.refresh_idents(true);
+        if changed {
             self.changed();
+        } else {
+            self.shared.invalidate_bars();
         }
     }
 
     fn apply(&mut self, e: WindowEvent) {
-        if self.shared.model.borrow_mut().apply(e) {
+        match &e {
+            WindowEvent::Activated(h) => {
+                let settled = self
+                    .shared
+                    .show_desktop_at
+                    .get()
+                    .is_none_or(|t| t.elapsed() > SHOW_DESKTOP_SETTLE);
+                let is_button = self
+                    .shared
+                    .model
+                    .borrow()
+                    .buttons()
+                    .iter()
+                    .any(|b| b.hwnd == *h);
+                if settled && is_button && self.shared.show_desktop.borrow().is_showing() {
+                    self.shared.show_desktop.borrow_mut().reset();
+                }
+            }
+            WindowEvent::Destroyed(h) => self.shared.show_desktop.borrow_mut().forget(*h),
+            _ => {}
+        }
+        let changed = self.shared.model.borrow_mut().apply(e);
+        if changed {
             self.changed();
         }
     }
@@ -377,6 +846,75 @@ impl Controller {
         }
         *self.shared.tray.borrow_mut() = host;
     }
+
+    fn request_catalog(&mut self) {
+        self.shared.catalog_at.set(Some(Instant::now()));
+        self.shared.shell_job(ShellJob::Catalog);
+    }
+
+    fn on_shell_done(&mut self) {
+        let done: Vec<ShellDone> = match self.shared.shell.borrow().as_ref() {
+            Some(w) => w.rx.try_iter().collect(),
+            None => Vec::new(),
+        };
+        let mut repaint = false;
+        let mut pins_changed = false;
+        for d in done {
+            match d {
+                ShellDone::WindowIcon(h, img) => {
+                    let mut icons = self.shared.window_icons.borrow_mut();
+                    if let Some(slot) = icons.get_mut(&h) {
+                        *slot = img;
+                        repaint = true;
+                    }
+                }
+                ShellDone::TargetIcon(k, img) => {
+                    self.shared.app_icons.borrow_mut().insert(k, img);
+                    repaint = true;
+                }
+                ShellDone::Links(v) => {
+                    let mut links = self.shared.links.borrow_mut();
+                    for (p, t) in v {
+                        links.insert(p.to_ascii_lowercase(), t);
+                    }
+                    pins_changed = true;
+                }
+                ShellDone::Catalog(apps) => {
+                    if apps.is_empty() && self.shared.catalog.borrow().is_some() {
+                        continue; // keep the previous catalog on failure
+                    }
+                    let catalog = Catalog::build(apps.iter().map(|a| a.entry.clone()));
+                    *self.shared.catalog.borrow_mut() = Some(apps);
+                    {
+                        let mut store = self.shared.pins.borrow_mut();
+                        store.reload_if_changed();
+                        if store.pins.seed_with(DEFAULT_TASKBAR_PIN_IDS, &catalog) {
+                            tracing::info!(
+                                pins = store.pins.keys.len(),
+                                "seeded default taskbar pins"
+                            );
+                            store.save();
+                        }
+                    }
+                    // App names of running windows come from the catalog.
+                    let hwnds: Vec<u64> = self.shared.idents.borrow().keys().copied().collect();
+                    for h in hwnds {
+                        let ident = self.shared.compute_ident(h);
+                        self.shared.idents.borrow_mut().insert(h, ident);
+                    }
+                    pins_changed = true;
+                }
+            }
+        }
+        if pins_changed {
+            self.shared.rebuild_pinned();
+            repaint = true;
+        }
+        if repaint {
+            self.shared.invalidate_bars();
+            flyout::invalidate(&self.shared);
+        }
+    }
 }
 
 impl Handler for Controller {
@@ -415,11 +953,17 @@ impl Handler for Controller {
                         }
                     }
                 }
+                *self.shared.shell.borrow_mut() =
+                    Some(ShellWorker::start(hwnd, self.shared.folders.clone()));
+                *self.shared.sys.borrow_mut() = Some(SysWorker::start(hwnd));
                 self.shared.update_clock();
+                self.shared.reload_tray_settings();
                 self.start_tray(hwnd);
+                self.shared.rebuild_pinned();
                 self.resync();
-                self.shared.refresh_window_icons();
+                flyout::create_window(&self.shared);
                 self.rebuild_bars();
+                self.request_catalog();
                 // SAFETY: timers on our own window.
                 unsafe {
                     SetTimer(Some(hwnd), TIMER_CLOCK, 1000, None);
@@ -432,12 +976,41 @@ impl Handler for Controller {
                 Some(LRESULT(0))
             }
             WM_APP_WINKEY => {
+                flyout::close(&self.shared);
                 explorer_win::ipc::send_launcher_command(LauncherCommand::Toggle);
                 Some(LRESULT(0))
             }
             WM_APP_TRAY_CHANGED => {
                 self.shared.invalidate_bars();
+                flyout::refresh(&self.shared);
                 Some(LRESULT(0))
+            }
+            WM_APP_SHELL_DONE => {
+                self.on_shell_done();
+                Some(LRESULT(0))
+            }
+            WM_APP_SYS_CHANGED => {
+                let snap = self.shared.sys.borrow().as_ref().map(|s| s.snapshot());
+                if let Some(mut snap) = snap {
+                    // Keep the value under the user's finger while dragging.
+                    if let Some(level) = flyout::dragging_volume(&self.shared) {
+                        if let Some(a) = snap.audio.as_mut() {
+                            a.level = level;
+                        }
+                    }
+                    if let Some(level) = flyout::dragging_brightness(&self.shared) {
+                        snap.brightness = Some(level);
+                    }
+                    *self.shared.sys_status.borrow_mut() = snap;
+                    self.shared.invalidate_bars();
+                    flyout::invalidate(&self.shared);
+                }
+                Some(LRESULT(0))
+            }
+            WM_POWERBROADCAST => {
+                // PBT_APMPOWERSTATUSCHANGE and friends: re-read now.
+                self.shared.sys_cmd(SysCmd::Refresh);
+                Some(LRESULT(1))
             }
             WM_SETTINGCHANGE => {
                 // Theme ("ImmersiveColorSet") or taskbar alignment changed.
@@ -446,6 +1019,7 @@ impl Handler for Controller {
                 if self.shared.reload_appearance() {
                     tracing::info!("appearance changed");
                     self.shared.invalidate_bars();
+                    flyout::invalidate(&self.shared);
                 }
                 None
             }
@@ -463,8 +1037,26 @@ impl Handler for Controller {
                             }
                             None => false,
                         };
-                        if pruned {
+                        if self.ticks % 30 == 0 {
+                            self.shared.tray_exe.borrow_mut().clear();
+                        }
+                        let settings = self.ticks % 5 == 0 && self.shared.reload_tray_settings();
+                        if pruned || settings {
                             self.shared.invalidate_bars();
+                        }
+                        if self.ticks % 2 == 0 && self.shared.pins.borrow_mut().reload_if_changed()
+                        {
+                            tracing::info!("taskbar pins changed on disk");
+                            self.shared.rebuild_pinned();
+                            self.shared.invalidate_bars();
+                        }
+                        if self
+                            .shared
+                            .catalog_at
+                            .get()
+                            .is_some_and(|t| t.elapsed() > CATALOG_REFRESH)
+                        {
+                            self.request_catalog();
                         }
                     }
                     TIMER_RESYNC => self.resync(),
@@ -472,6 +1064,10 @@ impl Handler for Controller {
                         // SAFETY: our own timer.
                         let _ = unsafe { KillTimer(Some(hwnd), TIMER_REBUILD) };
                         self.rebuild_bars();
+                    }
+                    TIMER_PEEK if !flyout::peek_tick(&self.shared) => {
+                        // SAFETY: our own timer.
+                        let _ = unsafe { KillTimer(Some(hwnd), TIMER_PEEK) };
                     }
                     _ => {}
                 }
@@ -484,667 +1080,14 @@ impl Handler for Controller {
                 unsafe { SetTimer(Some(hwnd), TIMER_REBUILD, 750, None) };
                 Some(LRESULT(0))
             }
+            // Only the graceful shutdown message or the quit menu end the
+            // taskbar; a WM_CLOSE from another program is ignored.
+            WM_CLOSE => Some(LRESULT(0)),
             WM_DESTROY => {
                 self.winkey = None;
                 self.hooks = None;
-                window::quit(0);
+                window::quit_unexpected();
                 Some(LRESULT(0))
-            }
-            _ => None,
-        }
-    }
-}
-
-fn thickness(config: &Config, dpi: u32) -> i32 {
-    (config.taskbar.height as f32 * explorer_win::dpi::scale(dpi)).round() as i32
-}
-
-// ---------------------------------------------------------------------------
-// Bar (one per monitor)
-// ---------------------------------------------------------------------------
-
-struct Bar {
-    shared: Rc<Shared>,
-    monitor: Monitor,
-    primary: bool,
-    appbar: Option<AppBar>,
-    surface: Option<Surface>,
-    layout: Option<Snapshot>,
-    hover: BarHit,
-    tracking: bool,
-    tooltip: Option<Tooltip>,
-}
-
-/// What was painted, for hit-testing and tooltips.
-struct Snapshot {
-    layout: BarLayout,
-    buttons: Vec<Button>,
-    tray: Vec<(IconKey, String)>,
-}
-
-const CMD_CLOSE_WINDOW: u32 = 1;
-const CMD_TASK_MANAGER: u32 = 10;
-const CMD_RESTART_TASKBAR: u32 = 11;
-const CMD_QUIT: u32 = 12;
-const CMD_SIGN_OUT: u32 = 13;
-const CMD_OPEN_LAUNCHER: u32 = 14;
-const CMD_TASKBAR_SETTINGS: u32 = 15;
-
-impl Bar {
-    fn scale(&self) -> f32 {
-        explorer_win::dpi::scale(self.monitor.dpi)
-    }
-
-    fn visible_buttons(&self) -> Vec<Button> {
-        let model = self.shared.model.borrow();
-        let own_only = self.shared.config.taskbar.windows_on_own_monitor_only;
-        model
-            .buttons()
-            .iter()
-            .filter(|b| {
-                !own_only || {
-                    // SAFETY: MonitorFromWindow accepts any handle.
-                    let m =
-                        unsafe { MonitorFromWindow(u64_to_hwnd(b.hwnd), MONITOR_DEFAULTTONEAREST) };
-                    m == self.monitor.handle
-                }
-            })
-            .cloned()
-            .collect()
-    }
-
-    fn tray_items(&self) -> Vec<(IconKey, String)> {
-        if !self.primary {
-            return Vec::new();
-        }
-        let tray = self.shared.tray.borrow();
-        let Some(t) = tray.as_ref() else {
-            return Vec::new();
-        };
-        let st = t.state.borrow();
-        st.model.visible().map(|i| (i.key, i.tip.clone())).collect()
-    }
-
-    fn compute(&self, hwnd: HWND) -> Snapshot {
-        let mut rc = RECT::default();
-        // SAFETY: valid out-pointer.
-        let _ = unsafe { GetClientRect(hwnd, &mut rc) };
-        let buttons = self.visible_buttons();
-        let tray = self.tray_items();
-        let t = &self.shared.config.taskbar;
-        let layout = bar_layout(&BarSpec {
-            width: (rc.right - rc.left) as f32,
-            height: (rc.bottom - rc.top) as f32,
-            scale: self.scale(),
-            n_buttons: buttons.len(),
-            button_width: t.button_width as f32,
-            labels: t.button_labels,
-            centered: self.shared.centered.get(),
-            show_clock: t.show_clock,
-            tray_icons: tray.len(),
-        });
-        Snapshot {
-            layout,
-            buttons,
-            tray,
-        }
-    }
-
-    fn position(&mut self, hwnd: HWND) {
-        // Refresh monitor info: DPI or work area may have changed.
-        if let Some(m) = monitors::query(self.monitor.handle) {
-            self.monitor = m;
-        }
-        let thickness = thickness(&self.shared.config, self.monitor.dpi);
-        let edge = self.shared.config.taskbar.position;
-        let rect = match self.appbar.as_mut() {
-            Some(ab) => ab.reserve(self.monitor.rect, edge, thickness),
-            None => explorer_win::appbar::bar_rect(self.monitor.rect, edge, thickness),
-        };
-        // SAFETY: positioning our own window.
-        let _ = unsafe {
-            SetWindowPos(
-                hwnd,
-                Some(HWND_TOPMOST),
-                rect.left,
-                rect.top,
-                rect.right - rect.left,
-                rect.bottom - rect.top,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            )
-        };
-        if let Some(s) = self.surface.as_mut() {
-            s.resize();
-        }
-        // SAFETY: repaint request on our own window.
-        let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
-    }
-
-    fn paint(&mut self, hwnd: HWND) {
-        let mut ps = PAINTSTRUCT::default();
-        // SAFETY: BeginPaint/EndPaint pairing in WM_PAINT.
-        unsafe { BeginPaint(hwnd, &mut ps) };
-        let snap = self.compute(hwnd);
-        let s = self.scale();
-        let pal = self.shared.palette.get();
-        let active = self.shared.model.borrow().active();
-        let clock_text = self.shared.clock_text.borrow().clone();
-        let hover = self.hover;
-        let labels = self.shared.config.taskbar.button_labels;
-        let icons: Vec<Option<SharedImage>> = {
-            let cache = self.shared.window_icons.borrow();
-            snap.buttons
-                .iter()
-                .map(|b| cache.get(&b.hwnd).cloned().flatten())
-                .collect()
-        };
-        let tray_images: Vec<Option<SharedImage>> = {
-            let tray = self.shared.tray.borrow();
-            match tray.as_ref() {
-                Some(t) => {
-                    let st = t.state.borrow();
-                    snap.tray
-                        .iter()
-                        .map(|(k, _)| st.images.get(k).cloned())
-                        .collect()
-                }
-                None => Vec::new(),
-            }
-        };
-        let l = &snap.layout;
-        let full_width = {
-            let mut rc = RECT::default();
-            // SAFETY: valid out-pointer.
-            let _ = unsafe { GetClientRect(hwnd, &mut rc) };
-            (rc.right - rc.left) as f32
-        };
-        let surface = self.surface.get_or_insert_with(|| Surface::new(hwnd));
-        surface.draw(&self.shared.gfx, Color(pal.bar_bg), |p| {
-            let inset =
-                |r: Rect| Rect::new(r.x + 2.0 * s, r.y + 4.0 * s, r.w - 4.0 * s, r.h - 8.0 * s);
-            let radius = 4.0 * s;
-            // Hairline separating the bar from the desktop.
-            p.fill(Rect::new(0.0, 0.0, full_width, 1.0), Color(pal.border));
-
-            // Start button: four rounded tiles in the accent colour.
-            if hover == BarHit::Start {
-                p.fill_rounded(inset(l.start), radius, Color(pal.button_hover));
-            }
-            let tile = 9.0 * s;
-            let gap = 1.5 * s;
-            let total = tile * 2.0 + gap;
-            let ox = l.start.x + (l.start.w - total) / 2.0;
-            let oy = l.start.y + (l.start.h - total) / 2.0;
-            for (dx, dy) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
-                p.fill_rounded(
-                    Rect::new(ox + dx * (tile + gap), oy + dy * (tile + gap), tile, tile),
-                    1.5 * s,
-                    Color(pal.accent_text),
-                );
-            }
-
-            // Window buttons.
-            for (i, (r, b)) in l.buttons.iter().zip(snap.buttons.iter()).enumerate() {
-                let is_active = active == Some(b.hwnd);
-                let ir = inset(*r);
-                let bg = if b.flashing {
-                    Some(pal.flash)
-                } else if is_active {
-                    Some(pal.button_active)
-                } else if hover == BarHit::Button(i) {
-                    Some(pal.button_hover)
-                } else {
-                    None
-                };
-                if let Some(bg) = bg {
-                    p.fill_rounded(ir, radius, Color(bg));
-                }
-                let icon_size = 24.0 * s;
-                let icon = icons.get(i).cloned().flatten();
-                if labels {
-                    let icon_r = Rect::new(
-                        ir.x + 8.0 * s,
-                        ir.y + (ir.h - icon_size) / 2.0,
-                        icon_size,
-                        icon_size,
-                    );
-                    if let Some(img) = &icon {
-                        p.image(img, icon_r);
-                    }
-                    let tx = icon_r.right() + 8.0 * s;
-                    p.text(
-                        &b.title,
-                        Rect::new(tx, ir.y, (ir.right() - tx - 6.0 * s).max(0.0), ir.h),
-                        12.0 * s,
-                        Color(pal.text),
-                        Align::Left,
-                        false,
-                    );
-                } else {
-                    let icon_r = Rect::new(
-                        ir.x + (ir.w - icon_size) / 2.0,
-                        ir.y + (ir.h - icon_size) / 2.0 - s,
-                        icon_size,
-                        icon_size,
-                    );
-                    match &icon {
-                        Some(img) => p.image(img, icon_r),
-                        None => {
-                            // No icon: first letter of the title.
-                            let letter: String = b.title.chars().take(1).collect();
-                            p.text(
-                                &letter,
-                                icon_r,
-                                16.0 * s,
-                                Color(pal.text),
-                                Align::Center,
-                                true,
-                            );
-                        }
-                    }
-                }
-                // Running indicator: short and dim; long and accent if active.
-                let (w, c) = if is_active {
-                    (16.0 * s, pal.accent_text)
-                } else {
-                    (6.0 * s, pal.running_indicator)
-                };
-                p.fill_rounded(
-                    Rect::new(ir.x + (ir.w - w) / 2.0, ir.bottom() - 3.0 * s, w, 3.0 * s),
-                    1.5 * s,
-                    Color(c),
-                );
-            }
-            if l.overflow > 0 {
-                // TODO(taskbar): overflow menu. For now show the count.
-                if let Some(last) = l.buttons.last() {
-                    let r = Rect::new(last.right(), 0.0, 28.0 * s, l.start.h);
-                    p.text(
-                        &format!("+{}", l.overflow),
-                        r,
-                        11.0 * s,
-                        Color(pal.text_dim),
-                        Align::Center,
-                        false,
-                    );
-                }
-            }
-
-            // Tray.
-            for (i, r) in l.tray.iter().enumerate() {
-                if hover == BarHit::Tray(i) {
-                    p.fill_rounded(inset(*r), radius, Color(pal.button_hover));
-                }
-                if let Some(Some(img)) = tray_images.get(i) {
-                    let sz = 16.0 * s;
-                    p.image(
-                        img,
-                        Rect::new(r.x + (r.w - sz) / 2.0, r.y + (r.h - sz) / 2.0, sz, sz),
-                    );
-                }
-            }
-
-            // Clock.
-            if let Some(c) = l.clock {
-                if hover == BarHit::Clock {
-                    p.fill_rounded(inset(c), radius, Color(pal.button_hover));
-                }
-                if clock_text.1.is_empty() {
-                    p.text(
-                        &clock_text.0,
-                        c,
-                        12.0 * s,
-                        Color(pal.text),
-                        Align::Center,
-                        false,
-                    );
-                } else {
-                    let half = c.h / 2.0;
-                    p.text(
-                        &clock_text.0,
-                        Rect::new(c.x, c.y + 4.0 * s, c.w, half - 4.0 * s),
-                        12.0 * s,
-                        Color(pal.text),
-                        Align::Center,
-                        false,
-                    );
-                    p.text(
-                        &clock_text.1,
-                        Rect::new(c.x, c.y + half, c.w, half - 4.0 * s),
-                        12.0 * s,
-                        Color(pal.text),
-                        Align::Center,
-                        false,
-                    );
-                }
-            }
-        });
-        self.layout = Some(snap);
-        // SAFETY: matches BeginPaint above.
-        let _ = unsafe { EndPaint(hwnd, &ps) };
-    }
-
-    fn hit(&self, lparam: LPARAM) -> BarHit {
-        let x = (lparam.0 & 0xffff) as i16 as f32;
-        let y = ((lparam.0 >> 16) & 0xffff) as i16 as f32;
-        match &self.layout {
-            Some(s) => s.layout.hit(x, y),
-            None => BarHit::Empty,
-        }
-    }
-
-    fn button(&self, i: usize) -> Option<Button> {
-        self.layout.as_ref().and_then(|s| s.buttons.get(i).cloned())
-    }
-
-    fn tray_key(&self, i: usize) -> Option<IconKey> {
-        self.layout
-            .as_ref()
-            .and_then(|s| s.tray.get(i).map(|t| t.0))
-    }
-
-    fn update_tooltip(&mut self, hwnd: HWND) {
-        let (text, rect) = match (self.hover, &self.layout) {
-            (BarHit::Start, Some(s)) => (Some("Start".to_string()), Some(s.layout.start)),
-            (BarHit::Button(i), Some(s)) => (
-                s.buttons.get(i).map(|b| b.title.clone()),
-                s.layout.buttons.get(i).copied(),
-            ),
-            (BarHit::Tray(i), Some(s)) => (
-                s.tray.get(i).map(|t| t.1.clone()),
-                s.layout.tray.get(i).copied(),
-            ),
-            (BarHit::Clock, Some(s)) => (
-                Some(self.shared.clock_text.borrow().2.clone()),
-                s.layout.clock,
-            ),
-            _ => (None, None),
-        };
-        match (text.filter(|t| !t.is_empty()), rect) {
-            (Some(text), Some(r)) => {
-                if self.tooltip.is_none() {
-                    self.tooltip = Tooltip::new(hwnd);
-                }
-                let mut pt = POINT {
-                    x: r.x as i32,
-                    y: 0,
-                };
-                // SAFETY: valid out-pointer.
-                let _ = unsafe { ClientToScreen(hwnd, &mut pt) };
-                let s = self.scale();
-                let y = match self.shared.config.taskbar.position {
-                    Edge::Bottom => pt.y - (34.0 * s) as i32,
-                    Edge::Top => pt.y + r.h as i32 + (6.0 * s) as i32,
-                };
-                if let Some(t) = self.tooltip.as_mut() {
-                    t.show(&text, pt.x, y);
-                }
-            }
-            _ => {
-                if let Some(t) = self.tooltip.as_mut() {
-                    t.hide();
-                }
-            }
-        }
-    }
-
-    fn on_click(&mut self, lparam: LPARAM, double: bool) {
-        match self.hit(lparam) {
-            BarHit::Start if !double => {
-                explorer_win::ipc::send_launcher_command(LauncherCommand::Toggle);
-            }
-            BarHit::Button(i) if !double => {
-                if let Some(b) = self.button(i) {
-                    let target = u64_to_hwnd(b.hwnd);
-                    let minimized = explorer_win::winlist::is_minimized(target);
-                    let action = self.shared.model.borrow().click_action(b.hwnd, minimized);
-                    match action {
-                        ClickAction::Activate => explorer_win::activate::activate(target),
-                        ClickAction::Minimize => explorer_win::activate::minimize(target),
-                    }
-                }
-            }
-            BarHit::Tray(i) => {
-                let button = if double {
-                    TrayButton::LeftDouble
-                } else {
-                    TrayButton::Left
-                };
-                self.click_tray(i, button);
-            }
-            _ => {}
-        }
-    }
-
-    fn click_tray(&self, i: usize, button: TrayButton) {
-        let Some(key) = self.tray_key(i) else {
-            return;
-        };
-        let mut pt = POINT::default();
-        // SAFETY: valid out-pointer.
-        let _ = unsafe { GetCursorPos(&mut pt) };
-        if let Some(t) = self.shared.tray.borrow().as_ref() {
-            t.click(key, button, pt.x, pt.y);
-        }
-    }
-
-    fn on_right_click(&mut self, hwnd: HWND, lparam: LPARAM) {
-        let hit = self.hit(lparam);
-        if let BarHit::Tray(i) = hit {
-            self.click_tray(i, TrayButton::Right);
-            return;
-        }
-        if let Some(t) = self.tooltip.as_mut() {
-            t.hide();
-        }
-        let b = match hit {
-            BarHit::Button(i) => self.button(i),
-            _ => None,
-        };
-        let mut items: Vec<(u32, &str)> = Vec::new();
-        if b.is_some() {
-            items.push((CMD_CLOSE_WINDOW, "Close window"));
-        } else {
-            items.push((CMD_OPEN_LAUNCHER, "Open Start"));
-            items.push((CMD_TASK_MANAGER, "Task Manager"));
-            items.push((CMD_TASKBAR_SETTINGS, "Taskbar settings"));
-            items.push((0, ""));
-            items.push((CMD_RESTART_TASKBAR, "Restart taskbar"));
-            match self.shared.mode {
-                RunMode::Dev => items.push((CMD_QUIT, "Quit explorer.rs")),
-                RunMode::Shell => items.push((CMD_SIGN_OUT, "Sign out")),
-            }
-        }
-        let cmd = popup_menu(hwnd, &items);
-        match cmd {
-            CMD_CLOSE_WINDOW => {
-                if let Some(b) = b {
-                    explorer_win::activate::close(u64_to_hwnd(b.hwnd));
-                }
-            }
-            CMD_OPEN_LAUNCHER => {
-                explorer_win::ipc::send_launcher_command(LauncherCommand::Show);
-            }
-            CMD_TASK_MANAGER => {
-                if let Err(e) = explorer_win::apps::shell_execute("taskmgr.exe", false) {
-                    tracing::warn!(error = %e, "cannot start Task Manager");
-                }
-            }
-            CMD_TASKBAR_SETTINGS => {
-                if let Err(e) = explorer_win::apps::shell_execute("ms-settings:taskbar", false) {
-                    tracing::warn!(error = %e, "cannot open taskbar settings");
-                }
-            }
-            CMD_RESTART_TASKBAR => window::quit(EXIT_RESTART),
-            CMD_QUIT => window::quit(EXIT_SHUTDOWN_ALL),
-            CMD_SIGN_OUT => {
-                // SAFETY: plain FFI call.
-                if let Err(e) = unsafe { ExitWindowsEx(EWX_LOGOFF, SHUTDOWN_REASON(0)) } {
-                    tracing::error!(error = %e, "ExitWindowsEx failed");
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-fn popup_menu(owner: HWND, items: &[(u32, &str)]) -> u32 {
-    // SAFETY: menu created and destroyed here; strings outlive the calls.
-    unsafe {
-        let Ok(menu) = CreatePopupMenu() else {
-            return 0;
-        };
-        let texts: Vec<Vec<u16>> = items.iter().map(|(_, t)| wide(t)).collect();
-        for ((id, _), w) in items.iter().zip(texts.iter()) {
-            if *id == 0 {
-                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-            } else {
-                let _ = AppendMenuW(
-                    menu,
-                    MF_STRING,
-                    *id as usize,
-                    explorer_win::windows::core::PCWSTR(w.as_ptr()),
-                );
-            }
-        }
-        let mut pt = POINT::default();
-        let _ = GetCursorPos(&mut pt);
-        let r = TrackPopupMenu(
-            menu,
-            TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
-            pt.x,
-            pt.y,
-            None,
-            owner,
-            None,
-        );
-        let _ = DestroyMenu(menu);
-        r.0 as u32
-    }
-}
-
-impl Handler for Bar {
-    fn handle(&mut self, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
-        match msg {
-            WM_CREATE => {
-                self.appbar = Some(AppBar::new(hwnd, WM_APP_APPBAR, self.shared.mode));
-                // Position outside WM_CREATE to avoid re-entrancy.
-                // SAFETY: posting to our own window.
-                let _ = unsafe { PostMessageW(Some(hwnd), WM_APP_POSITION, WPARAM(0), LPARAM(0)) };
-                Some(LRESULT(0))
-            }
-            WM_APP_POSITION => {
-                self.position(hwnd);
-                Some(LRESULT(0))
-            }
-            WM_APP_APPBAR => {
-                match wparam.0 {
-                    ABN_POSCHANGED => self.position(hwnd),
-                    ABN_FULLSCREENAPP => {
-                        // Step out of the way of full-screen apps (games,
-                        // videos, presentations) and come back afterwards.
-                        let fullscreen = lparam.0 != 0;
-                        let z = if fullscreen {
-                            HWND_NOTOPMOST
-                        } else {
-                            HWND_TOPMOST
-                        };
-                        // SAFETY: z-order change on our own window.
-                        let _ = unsafe {
-                            SetWindowPos(
-                                hwnd,
-                                Some(z),
-                                0,
-                                0,
-                                0,
-                                0,
-                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                            )
-                        };
-                    }
-                    _ => {}
-                }
-                Some(LRESULT(0))
-            }
-            WM_DPICHANGED => {
-                self.position(hwnd);
-                Some(LRESULT(0))
-            }
-            WM_ACTIVATE => {
-                if let Some(ab) = &self.appbar {
-                    ab.on_activate();
-                }
-                None
-            }
-            WM_WINDOWPOSCHANGED => {
-                if let Some(ab) = &self.appbar {
-                    ab.on_window_pos_changed();
-                }
-                None
-            }
-            WM_SIZE => {
-                if let Some(s) = self.surface.as_mut() {
-                    s.resize();
-                }
-                None
-            }
-            WM_PAINT => {
-                self.paint(hwnd);
-                Some(LRESULT(0))
-            }
-            WM_MOUSEACTIVATE => {
-                // Clicking the taskbar must not steal activation from the
-                // window the user is about to minimise.
-                Some(LRESULT(MA_NOACTIVATE as isize))
-            }
-            WM_MOUSEMOVE => {
-                if !self.tracking {
-                    let mut tme = TRACKMOUSEEVENT {
-                        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
-                        dwFlags: TME_LEAVE,
-                        hwndTrack: hwnd,
-                        dwHoverTime: 0,
-                    };
-                    // SAFETY: valid struct.
-                    self.tracking = unsafe { TrackMouseEvent(&mut tme) }.is_ok();
-                }
-                let h = self.hit(lparam);
-                if h != self.hover {
-                    self.hover = h;
-                    self.update_tooltip(hwnd);
-                    // SAFETY: repaint request on our own window.
-                    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
-                }
-                Some(LRESULT(0))
-            }
-            WM_MOUSELEAVE => {
-                self.tracking = false;
-                if self.hover != BarHit::Empty {
-                    self.hover = BarHit::Empty;
-                    self.update_tooltip(hwnd);
-                    // SAFETY: repaint request on our own window.
-                    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
-                }
-                Some(LRESULT(0))
-            }
-            WM_LBUTTONUP => {
-                self.on_click(lparam, false);
-                Some(LRESULT(0))
-            }
-            WM_LBUTTONDBLCLK => {
-                self.on_click(lparam, true);
-                Some(LRESULT(0))
-            }
-            WM_RBUTTONUP => {
-                self.on_right_click(hwnd, lparam);
-                Some(LRESULT(0))
-            }
-            WM_DESTROY => {
-                self.tooltip = None;
-                if let Some(mut ab) = self.appbar.take() {
-                    ab.remove();
-                }
-                None
             }
             _ => None,
         }

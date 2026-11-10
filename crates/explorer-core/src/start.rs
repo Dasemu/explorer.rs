@@ -16,6 +16,39 @@ pub struct Pins {
     pub initialized: bool,
     #[serde(default)]
     pub keys: Vec<String>,
+    /// The file exists but could not be read (sharing violation, access
+    /// denied, ...). While set, the in-memory pins are not authoritative:
+    /// defaults are not seeded and nothing is written, so a transient read
+    /// failure never overwrites the user's pins. Cleared by a successful
+    /// [`Pins::reload`].
+    #[serde(skip)]
+    pub unreadable: bool,
+}
+
+/// Result of reading a pins file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PinsRead {
+    Loaded(Pins),
+    /// No file yet (first run, or the user deleted it).
+    NotFound,
+    /// The file was read but is not valid TOML / not a pins file.
+    Corrupt(String),
+    /// The file could not be read (e.g. locked); try again later.
+    Unreadable(String),
+}
+
+/// What [`Pins::reload`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reload {
+    /// The in-memory pins now match the file (or the defaults when there
+    /// is no file).
+    Replaced,
+    /// The file was corrupt: it was moved to `*.corrupt`, the in-memory
+    /// pins were kept and written back.
+    RecoveredCorrupt,
+    /// The file could not be read; the in-memory pins were kept. Call
+    /// `reload` again later (do not record the file's modification time).
+    Retry,
 }
 
 /// Default taskbar pins (Windows 11 defaults), same matching rules as
@@ -45,18 +78,82 @@ pub const DEFAULT_PIN_IDS: &[&str] = &[
 ];
 
 impl Pins {
-    pub fn load(path: &Path) -> Self {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|s| toml::from_str(&s).ok())
-            .unwrap_or_default()
+    /// Read and parse `path` without side effects.
+    pub fn read(path: &Path) -> PinsRead {
+        match std::fs::read_to_string(path) {
+            Ok(s) => match toml::from_str::<Pins>(&s) {
+                Ok(p) => PinsRead::Loaded(p),
+                Err(e) => PinsRead::Corrupt(e.to_string()),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => PinsRead::NotFound,
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                PinsRead::Corrupt(e.to_string())
+            }
+            Err(e) => PinsRead::Unreadable(e.to_string()),
+        }
     }
 
+    /// Load the pins at start-up (see [`Pins::reload`] for error handling).
+    pub fn load(path: &Path) -> Self {
+        let mut p = Self::default();
+        p.reload(path);
+        p
+    }
+
+    /// Re-read `path`. A missing file yields the defaults (seeded later);
+    /// a corrupt file is moved aside once (`*.corrupt`) and the in-memory
+    /// pins are kept and written back; an unreadable file leaves
+    /// everything as it is and marks the pins [`Pins::unreadable`].
+    pub fn reload(&mut self, path: &Path) -> Reload {
+        match Self::read(path) {
+            PinsRead::Loaded(p) => {
+                *self = p;
+                Reload::Replaced
+            }
+            PinsRead::NotFound => {
+                *self = Self::default();
+                Reload::Replaced
+            }
+            PinsRead::Corrupt(e) => {
+                let bad = path.with_extension("toml.corrupt");
+                tracing::warn!(path = %path.display(), moved_to = %bad.display(), error = %e, "pins file is corrupt; keeping the pins in memory");
+                let _ = std::fs::remove_file(&bad);
+                if let Err(e) = std::fs::rename(path, &bad) {
+                    tracing::warn!(error = %e, "cannot move the corrupt pins file aside");
+                }
+                // Never seed defaults over what the user had.
+                self.initialized = true;
+                self.unreadable = false;
+                if let Err(e) = self.save(path) {
+                    tracing::warn!(error = %e, "cannot rewrite the pins file");
+                }
+                Reload::RecoveredCorrupt
+            }
+            PinsRead::Unreadable(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "cannot read the pins file; keeping the pins in memory");
+                self.unreadable = true;
+                Reload::Retry
+            }
+        }
+    }
+
+    /// If the last read failed, try again (before changing the pins).
+    pub fn retry_if_unreadable(&mut self, path: &Path) {
+        if self.unreadable {
+            self.reload(path);
+        }
+    }
+
+    /// Write atomically (unique temporary file + rename). Refuses while
+    /// the file could not be read, so it is never overwritten blindly.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        if self.unreadable {
+            return Err(std::io::Error::other(
+                "the pins file could not be read; not overwriting it",
+            ));
+        }
         let s = toml::to_string(self).map_err(std::io::Error::other)?;
-        let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, s)?;
-        std::fs::rename(&tmp, path)
+        crate::fsutil::write_atomic(path, s.as_bytes())
     }
 
     pub fn contains(&self, t: &LaunchTarget) -> bool {
@@ -97,7 +194,7 @@ impl Pins {
 
     /// Seed `ids` once (see [`DEFAULT_PIN_IDS`] for the matching rules).
     pub fn seed_with(&mut self, ids: &[&str], catalog: &Catalog) -> bool {
-        if self.initialized || catalog.is_empty() {
+        if self.initialized || self.unreadable || catalog.is_empty() {
             return false;
         }
         for id in ids {
@@ -129,6 +226,24 @@ impl Pins {
             .filter_map(|k| catalog.entries().iter().find(|e| &e.target.key() == k))
             .collect()
     }
+}
+
+/// Number of pages of the pinned grid (at least one, even when empty).
+pub fn page_count(total: usize, per_page: usize) -> usize {
+    if per_page == 0 {
+        return 1;
+    }
+    total.div_ceil(per_page).max(1)
+}
+
+/// Indexes of the pins shown on `page` (clamped to the last page).
+pub fn page_range(total: usize, per_page: usize, page: usize) -> std::ops::Range<usize> {
+    if per_page == 0 {
+        return 0..0;
+    }
+    let page = page.min(page_count(total, per_page) - 1);
+    let start = page * per_page;
+    start.min(total)..(start + per_page).min(total)
 }
 
 /// Group an alphabetical app list under first-letter headers, as Windows'
@@ -204,8 +319,63 @@ mod tests {
         assert_eq!(Pins::load(&path), p);
         assert!(p.unpin(r));
         assert!(!p.contains(r));
+    }
+
+    #[test]
+    fn corrupt_file_is_moved_aside_and_pins_kept() {
+        let c = catalog();
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("pins.toml");
+        let mut p = Pins::default();
+        p.pin(&c.entries()[3].target);
+        p.save(&path).unwrap();
         std::fs::write(&path, "nonsense = [").unwrap();
-        assert_eq!(Pins::load(&path), Pins::default());
+        assert_eq!(p.reload(&path), Reload::RecoveredCorrupt);
+        assert_eq!(p.keys, vec![c.entries()[3].target.key()]);
+        assert!(path.with_extension("toml.corrupt").exists());
+        // Written back, valid again.
+        assert_eq!(Pins::load(&path), p);
+        // A corrupt file at start-up: no defaults are seeded over it.
+        std::fs::write(&path, "keys = 5").unwrap();
+        let mut fresh = Pins::load(&path);
+        assert!(fresh.initialized && fresh.keys.is_empty());
+        assert!(!fresh.seed_defaults(&c));
+    }
+
+    #[test]
+    fn unreadable_file_keeps_pins_and_blocks_writes() {
+        let c = catalog();
+        let d = tempfile::tempdir().unwrap();
+        // A directory where the file should be: exists but cannot be read.
+        let path = d.path().join("pins.toml");
+        std::fs::create_dir(&path).unwrap();
+        let mut p = Pins::default();
+        p.pin(&c.entries()[0].target);
+        assert_eq!(p.reload(&path), Reload::Retry);
+        assert!(p.unreadable);
+        assert_eq!(p.keys.len(), 1);
+        assert!(p.save(&path).is_err());
+        let mut fresh = Pins::load(&path);
+        assert!(fresh.unreadable);
+        assert!(!fresh.seed_defaults(&c), "no defaults over unreadable pins");
+        // Readable again: the file wins.
+        std::fs::remove_dir(&path).unwrap();
+        Pins::default().save(&path).unwrap();
+        fresh.retry_if_unreadable(&path);
+        assert!(!fresh.unreadable);
+        assert!(!path.with_extension("toml.corrupt").exists());
+    }
+
+    #[test]
+    fn missing_file_yields_defaults() {
+        let d = tempfile::tempdir().unwrap();
+        let mut p = Pins {
+            initialized: true,
+            keys: vec!["x".into()],
+            unreadable: false,
+        };
+        assert_eq!(p.reload(&d.path().join("none.toml")), Reload::Replaced);
+        assert_eq!(p, Pins::default());
     }
 
     #[test]
@@ -213,6 +383,18 @@ mod tests {
         let mut p = Pins::default();
         p.keys.push("appsfolder:gone".into());
         assert!(p.resolve(&catalog()).is_empty());
+    }
+
+    #[test]
+    fn paging() {
+        assert_eq!(page_count(0, 18), 1);
+        assert_eq!(page_count(18, 18), 1);
+        assert_eq!(page_count(19, 18), 2);
+        assert_eq!(page_range(19, 18, 0), 0..18);
+        assert_eq!(page_range(19, 18, 1), 18..19);
+        assert_eq!(page_range(19, 18, 7), 18..19);
+        assert_eq!(page_range(0, 18, 0), 0..0);
+        assert_eq!(page_range(5, 0, 0), 0..0);
     }
 
     #[test]

@@ -23,14 +23,92 @@ interrupted install. It is harmless: the scripts treat it as "no backup".
 
 ## Built-in safety net
 
-In `--shell` mode the supervisor restarts crashed components with exponential
-backoff. A component that crashes more than 5 times in 60 seconds is given up
-on, and the others keep running. If the **taskbar** is given up on, the
-supervisor launches `explorer.exe` as a fallback so you are not left without a
-UI. This only helps if the supervisor itself starts and keeps running. If it
-fails to start at all, use the paths below.
+### Emergency keys (both modes)
 
-## Path 1: Task Manager, run explorer.exe
+| Keys | Effect |
+|---|---|
+| `Ctrl+Alt+Shift+E` | Start `explorer.exe` immediately. |
+| `Ctrl+Alt+Shift+R` | Restart explorer.rs (supervisor and every component). |
+
+The keys are registered by the guardian process (`explorer-rs.exe --dev` or
+`--shell`), which has no other job than keeping the supervisor alive, so they
+keep working while the taskbar or launcher is crashing. If another program
+already owns a key combination, registration fails and an error is written to
+`%LOCALAPPDATA%\explorer-rs\logs\guardian.*.log`.
+
+### Automatic restarts and fallback
+
+- Each component (taskbar, launcher, desktop, indexd) is restarted with
+  exponential backoff when it crashes; one that crashes more than 5 times in
+  60 seconds is given up on and the others keep running.
+- The supervisor itself is restarted by the guardian, with the same backoff.
+- In `--shell` mode a **crash loop** means: the supervisor fails 3 times
+  within 2 minutes of sign-in, the supervisor keeps crash-looping later, or the
+  **taskbar** fails 3 times within 2 minutes of sign-in / is given up on.
+  Then explorer.rs stops and asks (in English or Spanish):
+  - **Yes**: restore Windows Explorer permanently. The per-user `Shell`
+    value is restored (same logic as `restore-explorer.ps1`) and
+    `explorer.exe` starts as your shell.
+  - **No**: keep explorer.rs and try again at the next sign-in.
+    `explorer.exe` is started for this session (it may open only as a File
+    Explorer window instead of a full desktop; unverified). The guardian
+    stays in the background, so `Ctrl+Alt+Shift+R` can start explorer.rs again;
+    while the Windows Explorer shell runs, the guardian starts explorer.rs in
+    **dev mode** (alongside Explorer), never as a second shell.
+- Sign-out and shutdown are detected; components closing then are never
+  counted as crashes.
+- explorer.rs is stopped gracefully with the registered message
+  `ExplorerRs.Shutdown` (setup, `--restore-explorer`, config reload). Other
+  programs' `WM_CLOSE` is ignored (the Start menu just hides); a component
+  whose main window disappears for any other reason exits with 78 and is
+  restarted.
+- Apps you start from the Start menu, the taskbar or the desktop are not
+  part of explorer.rs's job object: restarting or quitting explorer.rs never
+  closes them.
+- If the guardian dies, the supervisor notices and falls back to
+  explorer.exe on its own. A new guardian that finds a supervisor already
+  running retries with a backoff of up to 60 s.
+
+### No endless boot loops
+
+Every shell-mode sign-in is recorded in
+`%LOCALAPPDATA%\explorer-rs\state\crashlog.toml`. A sign-in counts as
+**failed** when it fell back to explorer.exe, or when it neither ran
+healthily for 3 minutes nor ended with a normal sign-out (for example, you had
+to power off). After **3 failed sign-ins in a row**, explorer.rs restores
+Windows Explorer permanently by itself (on the 3rd failure, or at the next
+sign-in at the latest), starts it, and tells you so. A healthy sign-in or a
+normal sign-out resets the counter. To use explorer.rs again afterwards,
+register it again with the installer or `install-shell.ps1`.
+
+### `--restore-explorer` and `--status`
+
+- `explorer-rs.exe --restore-explorer` (the installer's Start-menu shortcut
+  "Restore Windows Explorer"): restores the per-user shell registration and
+  resets the failed-sign-in counter (the running guardian records this
+  itself; without a guardian the crash log is written directly). If the
+  Windows Explorer **shell** is not running (a File Explorer window does
+  not count), it checks that `explorer.exe` exists, asks the guardian
+  (found through its `ExplorerRs.Hotkeys` window) to stop gracefully,
+  stops any leftovers (supervisor before components), then starts
+  `explorer.exe`. Explorer is started after explorer.rs's desktop is gone
+  because it opens only a folder window while another program owns the
+  shell window; if it cannot be started, explorer.rs is started again so
+  the screen is never left empty. Run it from Task Manager's "Run new task"
+  if you have no Start menu.
+- `explorer-rs.exe --shell --resume` / `--dev --resume`: restart explorer.rs
+  without counting a new sign-in and without running startup apps again
+  (used by setup after an upgrade).
+- `explorer-rs.exe --restart`: asks the running guardian to restart every
+  explorer.rs component (same as `Ctrl+Alt+Shift+R`); exits with 1 if
+  explorer.rs is not running.
+- `explorer-rs.exe --status --output %TEMP%\explorer-rs-status.txt` writes a
+  diagnostics report (version, mode, components, shell registration, config
+  validity, recent crash-log events). Attach it to bug reports.
+
+If the guardian itself cannot start at all, use the paths below.
+
+## Path 1: Task Manager, run explorer.exe (or `explorer-rs.exe --restore-explorer`)
 
 1. Press `Ctrl+Shift+Esc` (or `Ctrl+Alt+Del` then Task Manager).
 2. `File` -> `Run new task`.

@@ -10,6 +10,12 @@ use clap::Parser;
 
 #[cfg(windows)]
 mod app;
+#[cfg(windows)]
+mod bar;
+#[cfg(windows)]
+mod flyout;
+#[cfg(windows)]
+mod workers;
 
 #[derive(Parser, Debug)]
 #[command(name = "explorer-rs-taskbar", version, about = "explorer.rs taskbar")]

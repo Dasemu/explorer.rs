@@ -21,7 +21,7 @@ use explorer_core::paths::AppPaths;
 use explorer_core::supervisor::EXIT_STOP;
 use explorer_index::transport::{self, Access, Listener};
 use explorer_index_client::{ClientOptions, IndexClient, Outcome, QueryFlags};
-use explorer_indexd::daemon::{resolve_roots, Daemon};
+use explorer_indexd::daemon::{self, resolve_roots, Daemon};
 use explorer_indexd::server;
 
 #[derive(Parser, Debug)]
@@ -120,9 +120,13 @@ fn run_daemon(config: &Config, paths: &AppPaths) -> i32 {
             .expect("spawn server thread")
     };
     let interval = config.index.snapshot_interval_s;
-    let tick = Duration::from_secs(if interval == 0 { 3600 } else { interval });
+    let snapshot_every = Duration::from_secs(if interval == 0 { 3600 } else { interval });
+    let tick = snapshot_every.min(daemon::HELPER_RETRY);
+    let mut last_snapshot = std::time::Instant::now();
     while !d.stop.sleep(tick) {
-        if interval > 0 {
+        d.retry_helper();
+        if interval > 0 && last_snapshot.elapsed() >= snapshot_every {
+            last_snapshot = std::time::Instant::now();
             if let Err(e) = d.save_snapshot(false) {
                 tracing::error!(error = %e, "periodic snapshot failed");
             }

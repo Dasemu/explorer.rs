@@ -29,6 +29,76 @@ pub struct Hit<'a> {
 
 const PREFIX_BONUS: u32 = 60;
 const WORD_PREFIX_BONUS: u32 = 25;
+/// Extra bonus when the whole name equals the query (accent-insensitive).
+const EXACT_BONUS: u32 = 100;
+
+/// Lower-case `s` and strip the accents of Latin letters (`Configuración`
+/// -> `configuracion`), so prefix bonuses work whichever way the user types.
+pub fn fold(s: &str) -> String {
+    s.chars()
+        .flat_map(char::to_lowercase)
+        .map(|c| match c {
+            'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' => 'a',
+            'é' | 'è' | 'ê' | 'ë' => 'e',
+            'í' | 'ì' | 'î' | 'ï' => 'i',
+            'ó' | 'ò' | 'ô' | 'ö' | 'õ' => 'o',
+            'ú' | 'ù' | 'û' | 'ü' => 'u',
+            'ñ' => 'n',
+            'ç' => 'c',
+            c => c,
+        })
+        .collect()
+}
+
+/// How a candidate's name relates to the query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MatchQuality {
+    Fuzzy,
+    WordPrefix,
+    Prefix,
+    Exact,
+}
+
+/// Classify `name` against a query (both folded internally).
+pub fn match_quality(name: &str, query: &str) -> MatchQuality {
+    let n = fold(name);
+    let q = fold(query.trim());
+    if q.is_empty() {
+        return MatchQuality::Fuzzy;
+    }
+    if n == q {
+        MatchQuality::Exact
+    } else if n.starts_with(&q) {
+        MatchQuality::Prefix
+    } else if n
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| w.starts_with(&q))
+    {
+        MatchQuality::WordPrefix
+    } else {
+        MatchQuality::Fuzzy
+    }
+}
+
+/// A parsed, non-empty query, reusable across many candidates.
+pub struct Query {
+    pattern: Pattern,
+    folded: String,
+}
+
+impl Query {
+    /// `None` for an empty (all-whitespace) query.
+    pub fn new(query: &str) -> Option<Self> {
+        let query = query.trim();
+        if query.is_empty() {
+            return None;
+        }
+        Some(Self {
+            pattern: Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart),
+            folded: fold(query),
+        })
+    }
+}
 
 impl Searcher {
     pub fn new() -> Self {
@@ -36,6 +106,42 @@ impl Searcher {
             matcher: Matcher::new(Config::DEFAULT),
             buf: Vec::new(),
         }
+    }
+
+    /// Score one candidate: fuzzy score on the name (keywords at half
+    /// weight) plus exact/prefix bonuses. `None` if nothing matches.
+    pub fn score<'k>(
+        &mut self,
+        q: &Query,
+        name: &str,
+        keywords: impl IntoIterator<Item = &'k str>,
+    ) -> Option<u32> {
+        let name_score = q
+            .pattern
+            .score(Utf32Str::new(name, &mut self.buf), &mut self.matcher);
+        let mut kw_prefix = false;
+        let mut kw_score: Option<u32> = None;
+        for k in keywords {
+            if let Some(s) = q
+                .pattern
+                .score(Utf32Str::new(k, &mut self.buf), &mut self.matcher)
+            {
+                kw_score = Some(kw_score.map_or(s / 2, |b| b.max(s / 2)));
+                if !kw_prefix && fold(k).starts_with(&q.folded) {
+                    kw_prefix = true;
+                }
+            }
+        }
+        let base = name_score.max(kw_score)?;
+        let mut score = base;
+        match match_quality(name, &q.folded) {
+            MatchQuality::Exact => score += EXACT_BONUS + PREFIX_BONUS,
+            MatchQuality::Prefix => score += PREFIX_BONUS,
+            MatchQuality::WordPrefix => score += WORD_PREFIX_BONUS,
+            MatchQuality::Fuzzy if kw_prefix => score += WORD_PREFIX_BONUS,
+            MatchQuality::Fuzzy => {}
+        }
+        Some(score)
     }
 
     pub fn search<'a>(
@@ -46,8 +152,7 @@ impl Searcher {
         limit: usize,
         now: u64,
     ) -> Vec<Hit<'a>> {
-        let query = query.trim();
-        if query.is_empty() {
+        let Some(q) = Query::new(query) else {
             let mut hits: Vec<Hit<'a>> = catalog
                 .entries()
                 .iter()
@@ -60,35 +165,17 @@ impl Searcher {
             hits.sort_by_key(|h| std::cmp::Reverse(h.score));
             hits.truncate(limit);
             return hits;
-        }
+        };
 
-        let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
-        let q_lower = query.to_lowercase();
         let mut hits = Vec::new();
         for e in catalog.entries() {
-            let name_score =
-                pattern.score(Utf32Str::new(&e.name, &mut self.buf), &mut self.matcher);
-            let kw_score = e
-                .keywords
-                .iter()
-                .filter_map(|k| pattern.score(Utf32Str::new(k, &mut self.buf), &mut self.matcher))
-                .max()
-                .map(|s| s / 2);
-            let Some(base) = name_score.max(kw_score) else {
+            let Some(score) = self.score(&q, &e.name, e.keywords.iter().map(String::as_str)) else {
                 continue;
             };
-            let name_lower = e.name.to_lowercase();
-            let mut score = base;
-            if name_lower.starts_with(&q_lower) {
-                score += PREFIX_BONUS;
-            } else if name_lower
-                .split(|c: char| !c.is_alphanumeric())
-                .any(|w| w.starts_with(&q_lower))
-            {
-                score += WORD_PREFIX_BONUS;
-            }
-            score += history.boost(&e.target, now);
-            hits.push(Hit { entry: e, score });
+            hits.push(Hit {
+                entry: e,
+                score: score + history.boost(&e.target, now),
+            });
         }
         hits.sort_by(|a, b| {
             b.score
@@ -165,6 +252,34 @@ mod tests {
         }]);
         let h = Searcher::new().search(&c, &LaunchHistory::default(), "system", 10, 0);
         assert_eq!(h.len(), 1);
+    }
+
+    #[test]
+    fn exact_and_accent_insensitive_prefix() {
+        let c = cat(&["Configuración", "Configurar copia", "Mapa"]);
+        let h = Searcher::new().search(&c, &LaunchHistory::default(), "configuracion", 10, 0);
+        assert_eq!(names(&h)[0], "Configuración");
+        assert_eq!(
+            match_quality("Configuración", "CONFIG"),
+            MatchQuality::Prefix
+        );
+        assert_eq!(match_quality("Mapa", "mapa"), MatchQuality::Exact);
+        assert_eq!(
+            match_quality("Task Manager", "man"),
+            MatchQuality::WordPrefix
+        );
+        assert_eq!(match_quality("Paint", "pnt"), MatchQuality::Fuzzy);
+        assert_eq!(fold("ÑANDÚ"), "nandu");
+    }
+
+    #[test]
+    fn keyword_prefix_gets_a_bonus() {
+        let mut s = Searcher::new();
+        let q = Query::new("wifi").unwrap();
+        let with = s.score(&q, "Network", ["wifi"]).unwrap();
+        let without = s.score(&q, "Network", ["xwifi"]);
+        assert!(without.is_none_or(|w| w < with));
+        assert!(Query::new("  ").is_none());
     }
 
     #[test]

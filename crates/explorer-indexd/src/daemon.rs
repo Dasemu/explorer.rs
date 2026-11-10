@@ -8,7 +8,7 @@
 //! 2. Windows otherwise: walk + `ReadDirectoryChangesW`;
 //! 3. elsewhere, or if watching fails: walk + periodic rescans.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -44,6 +44,24 @@ pub struct Daemon {
     last_save: Mutex<Option<Instant>>,
     saved_generation: AtomicU64,
     snapshot_path: PathBuf,
+    /// Volumes that fell back to walking because the elevated helper was
+    /// not reachable; retried periodically ([`Daemon::retry_helper`]).
+    helper_missing: Mutex<HashSet<VolId>>,
+}
+
+/// How often roots waiting for the elevated helper are retried.
+pub const HELPER_RETRY: Duration = Duration::from_secs(60);
+
+/// Roots (path) whose volume is waiting for the helper, in root order.
+pub fn roots_waiting_for_helper(
+    missing: &HashSet<VolId>,
+    roots: &[(VolId, String)],
+) -> Vec<String> {
+    roots
+        .iter()
+        .filter(|(v, _)| missing.contains(v))
+        .map(|(_, p)| p.clone())
+        .collect()
 }
 
 /// Expand `%VAR%` and a leading `~` in a configured root.
@@ -135,6 +153,7 @@ impl Daemon {
             last_save: Mutex::new(None),
             saved_generation: AtomicU64::new(generation),
             snapshot_path,
+            helper_missing: Mutex::new(HashSet::new()),
         })
     }
 
@@ -279,6 +298,7 @@ impl Daemon {
         use explorer_index::usn::{run_ntfs, UsnBackend, UsnError};
         use explorer_index::win::{ntfs::DirectBackend, volumes};
 
+        lock(&self.helper_missing).remove(&vol);
         let Some(letter) = volumes::drive_letter(path) else {
             return false;
         };
@@ -309,7 +329,8 @@ impl Daemon {
             let mut b = match backend {
                 Ok(b) => b,
                 Err(e) => {
-                    tracing::info!(root = %path, error = %e, "no MFT access (helper not running?); walking instead");
+                    tracing::info!(root = %path, error = %e, "no MFT access (helper not running?); walking instead, retrying the helper every minute");
+                    lock(&self.helper_missing).insert(vol);
                     return false;
                 }
             };
@@ -347,6 +368,52 @@ impl Daemon {
                 }
             }
         }
+    }
+
+    /// Roots that fell back to walking because the elevated helper was not
+    /// running: if the helper is reachable now, restart their source so it
+    /// switches to the MFT/USN journal (e.g. the helper task was started
+    /// after the daemon, or restarted by setup).
+    pub fn retry_helper(self: &Arc<Self>) {
+        let waiting = {
+            let missing = lock(&self.helper_missing);
+            if missing.is_empty() {
+                return;
+            }
+            let roots: Vec<(VolId, String)> = lock(&self.roots)
+                .iter()
+                .map(|h| (h.vol, h.path.clone()))
+                .collect();
+            roots_waiting_for_helper(&missing, &roots)
+        };
+        for root in waiting {
+            if !self.helper_reachable(&root) {
+                continue;
+            }
+            tracing::info!(root = %root, "the elevated helper is available now; switching to the MFT");
+            if let Err(e) = self.reindex(Some(&root)) {
+                tracing::warn!(root = %root, error = %e, "cannot restart the source");
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn helper_reachable(&self, root: &str) -> bool {
+        use explorer_index::helper::HelperBackend;
+        let Some(letter) = explorer_index::win::volumes::drive_letter(root) else {
+            return false;
+        };
+        HelperBackend::connect(
+            &explorer_index::transport::helper_endpoint(),
+            letter,
+            Duration::from_secs(2),
+        )
+        .is_ok()
+    }
+
+    #[cfg(not(windows))]
+    fn helper_reachable(&self, _root: &str) -> bool {
+        false
     }
 
     /// Write a snapshot if the index changed since the last one (or always
@@ -440,6 +507,14 @@ fn same_root(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn helper_retry_selection() {
+        let missing: HashSet<VolId> = [2].into_iter().collect();
+        let roots = vec![(1, "C:\\".to_string()), (2, "D:\\".to_string())];
+        assert_eq!(roots_waiting_for_helper(&missing, &roots), ["D:\\"]);
+        assert!(roots_waiting_for_helper(&HashSet::new(), &roots).is_empty());
+    }
 
     #[test]
     fn expand() {

@@ -7,9 +7,11 @@ members = [
     "crates/explorer-taskbar",
     "crates/explorer-launcher",
     "crates/explorer-supervisor",
+    "crates/explorer-desktop",
     "crates/explorer-index",
     "crates/explorer-indexd",
     "crates/explorer-index-client",
+    "crates/explorer-setup",
 ]
 exclude = ["fuzz"]
 
@@ -42,6 +44,8 @@ postcard = { version = "1", default-features = false, features = ["alloc"] }
 crc32fast = "1"
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 proptest = { version = "1", default-features = false, features = ["std"] }
+sha2 = "0.10"
+miniz_oxide = "0.8"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
