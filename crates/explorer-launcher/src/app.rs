@@ -29,6 +29,7 @@ use std::rc::Rc;
 use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant, SystemTime};
 
+use explorer_core::anim::{self, Fades, Tween};
 use explorer_core::catalog::{
     scan_folder, unix_now, AppEntry, AppSource, Catalog, LaunchHistory, LaunchTarget,
 };
@@ -74,14 +75,14 @@ use explorer_win::windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use explorer_win::windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DestroyMenu, GetClientRect, GetCursorPos,
-    GetWindowTextLengthW, GetWindowTextW, KillTimer, MoveWindow, PostMessageW, SendMessageW,
-    SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, ES_AUTOHSCROLL, HMENU, HWND_TOPMOST,
-    MF_SEPARATOR, MF_STRING, MSG, SWP_NOACTIVATE, SW_HIDE, SW_SHOW, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
-    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_STYLE, WM_ACTIVATE, WM_APP, WM_CLOSE,
-    WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN,
-    WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP,
-    WM_SETFONT, WM_SETTINGCHANGE, WM_SIZE, WM_TIMER, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP, WS_VISIBLE,
+    GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW, KillTimer, MoveWindow, PostMessageW,
+    SendMessageW, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, ES_AUTOHSCROLL, HMENU,
+    HWND_TOPMOST, MF_SEPARATOR, MF_STRING, MSG, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE,
+    SW_SHOW, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    WINDOW_STYLE, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT,
+    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_SETFONT, WM_SETTINGCHANGE, WM_SIZE,
+    WM_TIMER, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::model::{self, Row, SearchInput, Target};
@@ -97,6 +98,10 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 
 const EN_CHANGE: u32 = 0x0300;
 const STATUS_TIMER: usize = 1;
+/// Drives opening, view-change and hover animations while any runs.
+const ANIM_TIMER: usize = 2;
+/// One retry of taking the foreground shortly after showing.
+const FOCUS_TIMER: usize = 3;
 const STATUS_FOR: Duration = Duration::from_millis(1600);
 
 const VK_UP: u32 = 0x26;
@@ -204,7 +209,7 @@ const FOOTER: [FooterButton; 5] = [
 ];
 
 /// A clickable thing on screen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Hit {
     /// A focusable item: (zone, index) of the current view.
     Item(usize, usize),
@@ -216,7 +221,64 @@ enum Hit {
 
 enum IndexMsg {
     Catalog(Vec<AppEntry>),
+    /// A batch of newly extracted icons (several per indexing pass).
     Icons(HashMap<String, SharedImage>),
+    /// Every icon of the pass was sent.
+    IconsDone,
+}
+
+/// Icons sent per batch, so the menu fills in progressively.
+const ICON_BATCH: usize = 16;
+
+/// Extract icons for `targets` on up to four STA threads, sending them in
+/// batches. Returns how many were extracted.
+fn extract_icons(
+    targets: &[LaunchTarget],
+    tx: &std::sync::mpsc::Sender<IndexMsg>,
+    post: &(dyn Fn() + Sync),
+) -> usize {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let next = AtomicUsize::new(0);
+    let total = AtomicUsize::new(0);
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .clamp(1, 4)
+        .min(targets.len().max(1));
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            let tx = tx.clone();
+            let (next, total) = (&next, &total);
+            scope.spawn(move || {
+                let _com = ComApartment::sta();
+                let mut batch = HashMap::new();
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(t) = targets.get(i) else { break };
+                    if let Some(img) = explorer_win::icons::for_target(t, ICON_PX) {
+                        batch.insert(t.key(), img);
+                    }
+                    if batch.len() >= ICON_BATCH {
+                        total.fetch_add(batch.len(), Ordering::Relaxed);
+                        if tx
+                            .send(IndexMsg::Icons(std::mem::take(&mut batch)))
+                            .is_err()
+                        {
+                            return;
+                        }
+                        post();
+                    }
+                }
+                if !batch.is_empty() {
+                    total.fetch_add(batch.len(), Ordering::Relaxed);
+                    if tx.send(IndexMsg::Icons(batch)).is_ok() {
+                        post();
+                    }
+                }
+            });
+        }
+    });
+    total.load(Ordering::Relaxed)
 }
 
 /// Index all app sources. Must run with COM initialised.
@@ -355,6 +417,12 @@ pub fn run(args: Args) -> i32 {
         last_mouse: None,
         tooltip: None,
         tooltip_for: None,
+        anim_on: true,
+        anim_timer: false,
+        open_anim: None,
+        content_cover: 0.0,
+        view_anim: None,
+        hover_fx: Fades::default(),
         #[cfg(any(feature = "everything", feature = "file-index"))]
         files: None,
     };
@@ -402,6 +470,9 @@ pub fn run(args: Args) -> i32 {
         {
             return true;
         }
+        if msg.hwnd == edit_hwnd.get() && edit_shortcut(msg) {
+            return true;
+        }
         if msg.message == WM_KEYDOWN && msg.hwnd == edit_hwnd.get() {
             let vk = msg.wParam.0 as u32;
             let arrows_free = (vk == VK_LEFT || vk == VK_RIGHT)
@@ -426,6 +497,63 @@ pub fn run(args: Args) -> i32 {
     let code = window::exit_code();
     tracing::info!(code, loop_code, "launcher exiting");
     code
+}
+
+const EM_GETSEL: u32 = 0x00B0;
+const EM_SETSEL: u32 = 0x00B1;
+const EM_REPLACESEL: u32 = 0x00C2;
+const WM_CHAR: u32 = 0x0102;
+/// What a single-line EDIT control inserts for Ctrl+Backspace.
+const CTRL_BACKSPACE_CHAR: usize = 0x7F;
+
+/// Text-box shortcuts the single-line EDIT control lacks: Ctrl+A selects
+/// everything (so typing replaces the query), Ctrl+Backspace deletes the
+/// previous word. Returns true when the message was handled.
+fn edit_shortcut(msg: &MSG) -> bool {
+    let edit = msg.hwnd;
+    // SAFETY: key state query.
+    let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
+    if msg.message == WM_KEYDOWN && ctrl && msg.wParam.0 == b'A' as usize {
+        // SAFETY: standard EDIT message on our own control.
+        unsafe { SendMessageW(edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1))) };
+        return true;
+    }
+    if msg.message == WM_CHAR && msg.wParam.0 == CTRL_BACKSPACE_CHAR {
+        // SAFETY: EDIT messages and text read on our own control, with
+        // buffers sized from the reported length.
+        unsafe {
+            let (mut start, mut end) = (0u32, 0u32);
+            SendMessageW(
+                edit,
+                EM_GETSEL,
+                Some(WPARAM(&mut start as *mut u32 as usize)),
+                Some(LPARAM(&mut end as *mut u32 as isize)),
+            );
+            if start == end {
+                let len = GetWindowTextLengthW(edit).max(0) as usize;
+                let mut buf = vec![0u16; len + 1];
+                let n = GetWindowTextW(edit, &mut buf).max(0) as usize;
+                buf.truncate(n);
+                start = explorer_core::textedit::word_start_before(&buf, end as usize) as u32;
+                SendMessageW(
+                    edit,
+                    EM_SETSEL,
+                    Some(WPARAM(start as usize)),
+                    Some(LPARAM(end as isize)),
+                );
+            }
+            let empty = [0u16; 1];
+            SendMessageW(
+                edit,
+                EM_REPLACESEL,
+                Some(WPARAM(1)),
+                Some(LPARAM(empty.as_ptr() as isize)),
+            );
+        }
+        return true;
+    }
+    // Ctrl+A also produces a WM_CHAR (0x01) that would beep.
+    msg.message == WM_CHAR && msg.wParam.0 == 0x01
 }
 
 /// The taskbar's pin file, re-read when it changes on disk (the taskbar
@@ -562,6 +690,25 @@ struct Launcher {
     last_mouse: Option<(i32, i32)>,
     tooltip: Option<Tooltip>,
     tooltip_for: Option<Hit>,
+    // Animations (see explorer_core::anim).
+    anim_on: bool,
+    anim_timer: bool,
+    open_anim: Option<OpenAnim>,
+    /// Opacity of the cover painted over the content while opening (1 =
+    /// content hidden).
+    content_cover: f32,
+    view_anim: Option<Tween>,
+    hover_fx: Fades<Hit>,
+}
+
+/// The window sliding into place after `show`.
+#[derive(Debug, Clone, Copy)]
+struct OpenAnim {
+    tween: Tween,
+    x: i32,
+    y: i32,
+    /// +1: slides up from below (bottom taskbar); -1: slides down.
+    from_below: f32,
 }
 
 fn is_visible(hwnd: HWND) -> bool {
@@ -717,6 +864,10 @@ impl Launcher {
         self.index_rx = Some(rx);
         let extra = self.config.launcher.extra_folders.clone();
         let target = hwnd.0 as usize;
+        // Icons survive re-indexing: only new apps need extraction. Pinned
+        // apps (visible first) go to the front of the queue.
+        let known: HashSet<String> = self.icons.keys().cloned().collect();
+        let first: HashSet<String> = self.pins.keys.iter().cloned().collect();
         let r = std::thread::Builder::new()
             .name("start-index".into())
             .spawn(move || {
@@ -733,24 +884,25 @@ impl Launcher {
                     };
                 };
                 let entries = index_apps(&extra);
-                let targets: Vec<LaunchTarget> = entries.iter().map(|e| e.target.clone()).collect();
+                let mut targets: Vec<LaunchTarget> = entries
+                    .iter()
+                    .map(|e| e.target.clone())
+                    .filter(|t| !known.contains(&t.key()))
+                    .collect();
+                targets.sort_by_key(|t| !first.contains(&t.key()));
                 if tx.send(IndexMsg::Catalog(entries)).is_err() {
                     return;
                 }
                 post();
                 let started = Instant::now();
-                let icons: HashMap<String, SharedImage> = targets
-                    .iter()
-                    .filter_map(|t| {
-                        explorer_win::icons::for_target(t, ICON_PX).map(|i| (t.key(), i))
-                    })
-                    .collect();
+                let n = extract_icons(&targets, &tx, &post);
                 tracing::info!(
-                    icons = icons.len(),
+                    icons = n,
+                    cached = known.len(),
                     ms = started.elapsed().as_millis() as u64,
                     "extracted app icons"
                 );
-                if tx.send(IndexMsg::Icons(icons)).is_ok() {
+                if tx.send(IndexMsg::IconsDone).is_ok() {
                     post();
                 }
             });
@@ -984,6 +1136,9 @@ impl Launcher {
                 }
             }
         }
+        if self.view != View::Search {
+            self.start_view_anim(hwnd);
+        }
         self.view = View::Search;
         self.run_search(false);
         invalidate(hwnd);
@@ -991,8 +1146,12 @@ impl Launcher {
 
     fn set_view(&mut self, hwnd: HWND, view: View) {
         let prev = self.view;
+        if prev != view {
+            self.start_view_anim(hwnd);
+        }
         self.view = view;
         self.hover = None;
+        self.hover_fx.clear();
         match view {
             View::Home => {
                 self.rebuild_home();
@@ -1897,7 +2056,25 @@ impl Launcher {
                 };
                 // Position without showing; WM_SIZE re-enters and is
                 // dropped, so resize the surface and EDIT here.
-                let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE);
+                self.anim_on =
+                    explorer_win::theme::animations_enabled(self.config.general.animations);
+                let from_below = match self.config.taskbar.position {
+                    Edge::Bottom => 1.0,
+                    Edge::Top => -1.0,
+                };
+                let start_y = if self.anim_on {
+                    self.open_anim = Some(OpenAnim {
+                        tween: Tween::new(Instant::now(), anim::OPEN),
+                        x,
+                        y,
+                        from_below,
+                    });
+                    self.content_cover = 1.0;
+                    y + (from_below * self.s(anim::OPEN_SLIDE)) as i32
+                } else {
+                    y
+                };
+                let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, start_y, w, h, SWP_NOACTIVATE);
                 if let Some(s) = self.surface.as_mut() {
                     s.resize();
                 }
@@ -1905,6 +2082,8 @@ impl Launcher {
             }
         }
         self.reset(hwnd);
+        // The view reset above is not a visible transition.
+        self.view_anim = None;
         if self.indexed_at.is_none_or(|t| t.elapsed() > REINDEX_AFTER) {
             self.start_indexing(hwnd);
         }
@@ -1919,10 +2098,118 @@ impl Launcher {
             let _ = ShowWindow(hwnd, SW_SHOW);
             explorer_win::activate::force_foreground(hwnd);
             let _ = SetFocus(Some(self.edit));
+            if GetForegroundWindow() != hwnd {
+                // Keystrokes would go to the previous window: try again
+                // once the input that opened us has been processed.
+                SetTimer(Some(hwnd), FOCUS_TIMER, 50, None);
+            }
         }
         self.render(hwnd);
         // SAFETY: the frame was just drawn.
         let _ = unsafe { ValidateRect(Some(hwnd), None) };
+        if self.open_anim.is_some() {
+            self.kick_anim(hwnd);
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Animations
+    // ---------------------------------------------------------------
+
+    fn kick_anim(&mut self, hwnd: HWND) {
+        if !self.anim_timer {
+            // SAFETY: timer on our own window.
+            unsafe { SetTimer(Some(hwnd), ANIM_TIMER, anim::FRAME.as_millis() as u32, None) };
+            self.anim_timer = true;
+        }
+    }
+
+    fn stop_anims(&mut self, hwnd: HWND) {
+        self.open_anim = None;
+        self.view_anim = None;
+        self.content_cover = 0.0;
+        self.hover_fx.clear();
+        if self.anim_timer {
+            // SAFETY: our own timer.
+            let _ = unsafe { KillTimer(Some(hwnd), ANIM_TIMER) };
+            self.anim_timer = false;
+        }
+    }
+
+    fn start_view_anim(&mut self, hwnd: HWND) {
+        if self.anim_on && is_visible(hwnd) {
+            self.view_anim = Some(Tween::new(Instant::now(), anim::VIEW));
+            self.kick_anim(hwnd);
+        }
+    }
+
+    fn set_hover(&mut self, hwnd: HWND, hit: Option<Hit>) {
+        self.hover = hit;
+        self.hover_fx.set_only(hit, Instant::now(), self.anim_on);
+        if self.hover_fx.animating() {
+            self.kick_anim(hwnd);
+        }
+    }
+
+    /// One animation frame: move the opening window, advance fades, and
+    /// paint right away (no WM_PAINT round trip).
+    fn on_anim_tick(&mut self, hwnd: HWND) {
+        let now = Instant::now();
+        let mut active = false;
+        if let Some(a) = self.open_anim {
+            let f = anim::open_frame(&a.tween, now, self.s(anim::OPEN_SLIDE));
+            let y = a.y + (f.offset * a.from_below).round() as i32;
+            // SAFETY: moving our own window (no size, Z-order or activation
+            // change).
+            let _ = unsafe {
+                SetWindowPos(
+                    hwnd,
+                    None,
+                    a.x,
+                    y,
+                    0,
+                    0,
+                    SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER,
+                )
+            };
+            self.content_cover = 1.0 - f.opacity;
+            if a.tween.done(now) {
+                self.open_anim = None;
+                self.content_cover = 0.0;
+            } else {
+                active = true;
+            }
+        }
+        if let Some(t) = self.view_anim {
+            if t.done(now) {
+                self.view_anim = None;
+            } else {
+                active = true;
+            }
+        }
+        if self.hover_fx.advance(now) {
+            active = true;
+        }
+        self.render(hwnd);
+        // SAFETY: the frame was just drawn.
+        let _ = unsafe { ValidateRect(Some(hwnd), None) };
+        if !active && self.anim_timer {
+            // SAFETY: our own timer.
+            let _ = unsafe { KillTimer(Some(hwnd), ANIM_TIMER) };
+            self.anim_timer = false;
+        }
+    }
+
+    /// Vertical offset and cover opacity of the view body during a view
+    /// change.
+    fn view_frame(&self) -> (f32, f32) {
+        match self.view_anim {
+            Some(t) => {
+                let e = anim::ease_out_cubic(t.progress(Instant::now()));
+                (self.s(anim::VIEW_SLIDE) * (1.0 - e), 1.0 - e)
+            }
+            None => (0.0, 0.0),
+        }
     }
 
     fn hide(&mut self, hwnd: HWND) {
@@ -1933,6 +2220,7 @@ impl Launcher {
         if !is_visible(hwnd) {
             return;
         }
+        self.stop_anims(hwnd);
         // SAFETY: hiding our own window.
         let _ = unsafe { ShowWindow(hwnd, SW_HIDE) };
         self.reset(hwnd);
@@ -2013,14 +2301,14 @@ impl Launcher {
     fn item_bg(&self, p: &Painter<'_>, r: Rect, z: usize, i: usize) {
         let pal = &self.palette;
         let focused = self.is_focused(z, i);
-        let hovered = self.hover == Some(Hit::Item(z, i));
         if focused {
             p.fill_rounded(r, self.s(4.0), Color(pal.selection));
-        } else if hovered {
-            p.fill_rounded(
+        } else {
+            p.fill_rounded_alpha(
                 r,
                 self.s(4.0),
-                Color(explorer_core::theme::mix(pal.panel_bg, pal.selection, 0.6)),
+                Color(pal.selection),
+                0.6 * self.hover_fx.level(Hit::Item(z, i)),
             );
         }
         if focused && self.focus_visible {
@@ -2076,16 +2364,13 @@ impl Launcher {
         let width = s(44.0 + 6.6 * label.chars().count() as f32);
         let r = Rect::new(w - s(PAD) - width, self.body_top() + s(2.0), width, s(28.0));
         let focused = self.is_focused(z, 0);
-        let hovered = self.hover == Some(Hit::Item(z, 0));
-        p.fill_rounded(
-            r,
-            s(4.0),
-            Color(if focused || hovered {
-                pal.selection
-            } else {
-                pal.input_bg
-            }),
-        );
+        let lift = if focused {
+            1.0
+        } else {
+            self.hover_fx.level(Hit::Item(z, 0))
+        };
+        p.fill_rounded(r, s(4.0), Color(pal.input_bg));
+        p.fill_rounded_alpha(r, s(4.0), Color(pal.selection), lift);
         if focused && self.focus_visible {
             p.stroke_rounded(r, s(4.0), s(2.0).max(2.0), Color(pal.text));
         }
@@ -2158,13 +2443,31 @@ impl Launcher {
             p.stroke_rounded(search, s(18.0), s(2.0).max(2.0), Color(pal.text));
         }
 
-        match self.view {
+        let body_y = search.bottom() + s(2.0);
+        let footer_y = self.footer_rect(w, h).y;
+        let body = Rect::new(1.0, body_y, w - 2.0, (footer_y - body_y).max(0.0));
+        let (dy, cover) = self.view_frame();
+        let draw_view = |p: &Painter<'_>, hits: &mut Vec<(Hit, Rect)>| match self.view {
             View::Home => self.draw_home(p, w, h, hits),
             View::AllApps => self.draw_all(p, w, h, hits),
             View::Letters => self.draw_letters(p, w, h, hits),
             View::Search => self.draw_search(p, w, h, hits),
+        };
+        if dy > 0.0 {
+            // Hit rectangles keep their final (untranslated) positions.
+            p.clipped(body, |p| p.translated(0.0, dy, |p| draw_view(p, hits)));
+            p.fill_alpha(body, Color(pal.panel_bg), cover);
+        } else {
+            draw_view(p, hits);
         }
         self.draw_footer(p, w, h, hits);
+        if self.content_cover > 0.0 {
+            p.fill_alpha(
+                Rect::new(1.0, body_y, w - 2.0, (h - 1.0 - body_y).max(0.0)),
+                Color(pal.panel_bg),
+                self.content_cover,
+            );
+        }
     }
 
     fn draw_home(&self, p: &Painter<'_>, w: f32, h: f32, hits: &mut Vec<(Hit, Rect)>) {
@@ -2248,10 +2551,12 @@ impl Launcher {
                 let d = Rect::new(x, y + (step - dot) / 2.0, dot, dot);
                 let c = if page == self.pin_page {
                     pal.accent_text
-                } else if self.hover == Some(Hit::PageDot(page)) {
-                    pal.text
                 } else {
-                    pal.text_dim
+                    explorer_core::theme::mix(
+                        pal.text_dim,
+                        pal.text,
+                        self.hover_fx.level(Hit::PageDot(page)),
+                    )
                 };
                 p.fill_rounded(d, dot / 2.0, Color(c));
                 hits.push((Hit::PageDot(page), hit));
@@ -2376,9 +2681,12 @@ impl Launcher {
                 }
                 let letter = self.letters.get(k).map(|(_, c)| *c).unwrap_or('#');
                 let lr = Rect::new(r.x + s(4.0), r.y + s(2.0), s(32.0), r.h - s(4.0));
-                if self.hover == Some(Hit::Letter(k)) {
-                    p.fill_rounded(lr, s(4.0), Color(pal.selection));
-                }
+                p.fill_rounded_alpha(
+                    lr,
+                    s(4.0),
+                    Color(pal.selection),
+                    self.hover_fx.level(Hit::Letter(k)),
+                );
                 p.text(
                     &letter.to_string(),
                     lr,
@@ -2833,8 +3141,8 @@ impl Handler for Launcher {
                             }
                             self.clamp_focus();
                         }
-                        IndexMsg::Icons(icons) => {
-                            self.icons.extend(icons);
+                        IndexMsg::Icons(icons) => self.icons.extend(icons),
+                        IndexMsg::IconsDone => {
                             self.indexing = false;
                             self.index_rx = None;
                             // Icons the bulk pass missed (e.g. files).
@@ -2909,7 +3217,21 @@ impl Handler for Launcher {
                 None
             }
             WM_TIMER => {
-                if wparam.0 == STATUS_TIMER {
+                if wparam.0 == ANIM_TIMER {
+                    self.on_anim_tick(hwnd);
+                } else if wparam.0 == FOCUS_TIMER {
+                    // SAFETY: our own timer, window and control.
+                    unsafe {
+                        let _ = KillTimer(Some(hwnd), FOCUS_TIMER);
+                        if is_visible(hwnd) && GetForegroundWindow() != hwnd {
+                            explorer_win::activate::force_foreground(hwnd);
+                            let _ = SetFocus(Some(self.edit));
+                            if GetForegroundWindow() != hwnd {
+                                tracing::warn!("the Start menu could not take the keyboard focus");
+                            }
+                        }
+                    }
+                } else if wparam.0 == STATUS_TIMER {
                     // SAFETY: our own timer.
                     let _ = unsafe { KillTimer(Some(hwnd), STATUS_TIMER) };
                     if self.status.take().is_some() {
@@ -2941,7 +3263,7 @@ impl Handler for Launcher {
                 }
                 let hit = self.hit(lparam);
                 if hit != self.hover {
-                    self.hover = hit;
+                    self.set_hover(hwnd, hit);
                     invalidate(hwnd);
                 }
                 self.update_tooltip(hwnd);
@@ -2950,7 +3272,8 @@ impl Handler for Launcher {
             WM_MOUSELEAVE => {
                 self.tracking = false;
                 self.last_mouse = None;
-                if self.hover.take().is_some() {
+                if self.hover.is_some() {
+                    self.set_hover(hwnd, None);
                     invalidate(hwnd);
                 }
                 self.update_tooltip(hwnd);

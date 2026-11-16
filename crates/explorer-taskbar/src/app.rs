@@ -977,6 +977,10 @@ impl Handler for Controller {
             }
             WM_APP_WINKEY => {
                 flyout::close(&self.shared);
+                // The key went to the foreground app, not to us: become the
+                // last input sender so the launcher may take the focus
+                // (otherwise typing can go to the previous window).
+                explorer_win::keyboard::claim_foreground_rights();
                 explorer_win::ipc::send_launcher_command(LauncherCommand::Toggle);
                 Some(LRESULT(0))
             }

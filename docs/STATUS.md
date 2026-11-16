@@ -1,7 +1,7 @@
 # Status
 
 Release candidate: feature complete, awaiting testing on real Windows.
-Last updated: 2026-11-04.
+Last updated: 2026-11-16.
 
 Legend: **reported** = confirmed by a tester on Windows; **implemented,
 unverified** = compiles for `x86_64-pc-windows-msvc` and is covered by Linux
@@ -21,6 +21,20 @@ tests where the logic is pure, but has never run on Windows.
 | Implemented, awaiting test | Start button and menu unlike Windows → Windows 11-style Start menu and four-tile Start button |
 | Implemented, awaiting test | No tray → tray host, with dev-mode interception |
 | Implemented, awaiting test | Theme not applied → light/dark mode and accent colour, live |
+
+## Round 2 (release-candidate plan, Windows 11 25H2, 1 monitor at 125 %)
+
+| Result | Item |
+|---|---|
+| Works | Install (silent, alongside, file search on), dev mode, MFT index (738k entries in 1.3-8 s, snapshots, resume from the USN journal), restarts after killing components, config hot reload incl. invalid value rejected, calculator (`6*7`, `6*1/4`), `>ipconfig`, `pantalla`, URLs and `14:30` rejected, thumbnails and picker, calendar, Quick settings, uninstall |
+| Fixed, awaiting re-test | Ctrl+A did not select the query (typing appended: `14:3pantalla`) → Ctrl+A / Ctrl+Backspace |
+| Fixed, awaiting re-test | `blo`: Best match was Blockbench, not Bloc de notas; scattered matches (Comprobar Actualizaciones, Editar las variables de entorno...) listed → coverage bonus, scattered-match filter |
+| Fixed, awaiting re-test | Unthemed yellow tooltips; binaries had no manifest (built without a resource compiler) → build.rs writes the `.res` itself |
+| Fixed, awaiting re-test | "Inicio" tooltip stayed over the open Start menu → tooltips hide on click |
+| Fixed, awaiting re-test | Typed text could reach another window after opening Start with the Win key → foreground grant after an injected mask key, one retry |
+| Fixed, awaiting re-test | Every uninstall ended with "reboot required" (exit code 3) and renamed the uninstaller twice (`uninstall.exe.0.old.0.old`) → scheduled files remembered; the leftover folder is removed at reboot; distinct step names for the three task removals |
+| New, awaiting test | Animations: Start menu and flyouts slide in, view changes and hover highlights fade (`[general] animations`) |
+| New, awaiting test | Start menu re-indexing keeps extracted icons; new icons are extracted on up to 4 threads, pinned apps first, in batches |
 
 This is the round-1 history. Every "awaiting re-test" row is now part of the
 release-candidate plan in [TESTING-ON-WINDOWS.md](TESTING-ON-WINDOWS.md).

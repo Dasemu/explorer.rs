@@ -134,6 +134,46 @@ clear the query → back to Home (or from the letter picker to All apps) →
 close. A focus ring is drawn after keyboard navigation; mouse hover
 highlights without moving the keyboard focus.
 
+The search box adds what the native EDIT control lacks: Ctrl+A selects the
+whole query (typing then replaces it) and Ctrl+Backspace deletes the
+previous word (`explorer_core::textedit`).
+
+## Focus
+
+The Start menu takes the foreground when it opens (keystrokes must never
+reach the previous window). The taskbar grants it the right first
+(`AllowSetForegroundWindow`); for the Win key, whose input went to the
+foreground app, the taskbar first injects the inert mask key so that it is
+the last input sender, which Windows requires for that grant. If the menu
+still is not in the foreground, it retries once 50 ms later and logs a
+warning when that fails too.
+
+## Animations
+
+`explorer_core::anim` (time-based, unit-tested) drives every transition;
+frames come from an 8 ms timer that only runs while something moves.
+
+- Opening: the window slides 28 px into place from the taskbar side
+  (220 ms, quintic ease-out) while the content below the search box fades
+  in. Only the window position changes per frame; the content is drawn
+  once plus a translucent cover, so the slide costs almost nothing.
+- View changes (Home, All apps, letter picker, search results): the body
+  slides 12 px and fades in (140 ms).
+- Hover highlights fade in (90 ms) and out (180 ms).
+
+`[general] animations = false`, or Windows' "Animation effects" setting
+(`SPI_GETCLIENTAREAANIMATION`), turns all of this off.
+
+## Matching
+
+Names are matched with `nucleo-matcher`, then filtered: a scattered match
+must start at a word start and every further character must either follow
+the previous one or start a new word ("vsc" → Visual Studio Code, "wterm"
+→ Windows Terminal), unless the name contains the query. So `blo` finds
+"Bloc de notas", "Blockbench" and "Roblox", not "Compro**b**ar
+Actua**l**izaci**o**nes". Among prefix matches, the one whose word the
+query covers best wins ("blo": Bloc 3/4 before Blockbench 3/10).
+
 ## Performance
 
 The UI thread only runs the in-memory app and settings search (well under a

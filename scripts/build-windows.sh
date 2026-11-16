@@ -15,7 +15,8 @@
 #      payload is embedded in explorer-rs-setup.exe.
 #
 # Requirements: rustup target x86_64-pc-windows-msvc, cargo-xwin
-# (`cargo install cargo-xwin --locked`), clang/lld, llvm-rc, zip.
+# (`cargo install cargo-xwin --locked`), clang/lld, zip. (Resources are
+# written by build.rs itself; no resource compiler is needed.)
 # cargo-xwin downloads the MSVC CRT and Windows SDK on first use; doing so
 # accepts Microsoft's license terms for those components.
 #

@@ -358,6 +358,7 @@ name = "explorer-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "criterion",
  "nucleo-matcher",
  "serde",
  "tempfile",
@@ -479,6 +480,7 @@ dependencies = [
  "explorer-core",
  "tracing",
  "windows 0.62.2",
+ "windows-numerics",
  "winvd",
 ]
 

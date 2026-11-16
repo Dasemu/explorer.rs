@@ -24,6 +24,7 @@
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use explorer_core::anim::{self, Tween};
 use explorer_core::calendar;
 use explorer_core::flyout_layout::{
     self as fl, CalendarLayout, HAnchor, ListLayout, PickerLayout, QuickSettingsLayout, SliderRow,
@@ -52,11 +53,12 @@ use explorer_win::windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_NEXT, VK_PRIOR, VK_RIGHT,
 };
 use explorer_win::windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetForegroundWindow, GetWindowRect, IsWindowVisible, SetTimer, SetWindowPos,
-    ShowWindow, HWND_TOPMOST, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, WM_ACTIVATE,
-    WM_CAPTURECHANGED, WM_DPICHANGED, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_SIZE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    GetCursorPos, GetForegroundWindow, GetWindowRect, IsWindowVisible, KillTimer, SetTimer,
+    SetWindowPos, ShowWindow, HWND_TOPMOST, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE,
+    SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, WM_ACTIVATE, WM_CAPTURECHANGED, WM_DPICHANGED,
+    WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_SIZE, WM_TIMER, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP,
 };
 
 use crate::app::{Shared, TIMER_PEEK};
@@ -64,6 +66,10 @@ use crate::bar::net_kind;
 use crate::workers::SysCmd;
 
 const FLYOUT_CLASS: &str = "ExplorerRs.TaskbarFlyout";
+/// Opening slide frames (timer on the flyout window).
+const TIMER_SLIDE: usize = 1;
+/// Slide distance of flyouts, logical pixels (smaller than Start's).
+const SLIDE: f32 = 16.0;
 
 /// WinUser.h value; not exported by the `windows` crate module we use.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -177,6 +183,8 @@ pub(crate) struct State {
     drag: Option<Drag>,
     opened_at: Instant,
     left_at: Option<Instant>,
+    /// Opening slide in progress.
+    slide: Option<Tween>,
 }
 
 impl State {
@@ -627,10 +635,30 @@ fn register_thumbs(shared: &Shared, hwnd: HWND) {
     }
 }
 
+/// Remaining slide offset (pixels, towards the final position) and cover
+/// opacity of the content at `now`.
+fn slide_frame(st: &State, now: Instant) -> (i32, f32) {
+    match st.slide {
+        Some(t) => {
+            let f = anim::open_frame(&t, now, SLIDE * st.scale());
+            let dir = if st.anchor.bottom { 1.0 } else { -1.0 };
+            ((f.offset * dir).round() as i32, 1.0 - f.opacity)
+        }
+        None => (0, 0.0),
+    }
+}
+
 fn show_window(shared: &Shared, activate: bool) {
     let hwnd = shared.flyout_hwnd.get();
-    let geom = shared.flyout.borrow().as_ref().map(place);
-    let Some((x, y, w, h)) = geom else { return };
+    let geom = shared
+        .flyout
+        .borrow()
+        .as_ref()
+        .map(|st| (place(st), slide_frame(st, Instant::now()).0));
+    let Some(((x, y, w, h), dy)) = geom else {
+        return;
+    };
+    let y = y + dy;
     let flags = if activate {
         SWP_SHOWWINDOW
     } else {
@@ -676,8 +704,26 @@ fn open(shared: &Rc<Shared>, opener: Opener, req: Request, anchor: Anchor, stick
         drag: None,
         opened_at: Instant::now(),
         left_at: None,
+        slide: explorer_win::theme::animations_enabled(shared.config.general.animations)
+            .then(|| Tween::new(Instant::now(), anim::OPEN)),
     });
     show_window(shared, sticky);
+    if shared
+        .flyout
+        .borrow()
+        .as_ref()
+        .is_some_and(|s| s.slide.is_some())
+    {
+        // SAFETY: timer on our own window.
+        unsafe {
+            SetTimer(
+                Some(hwnd),
+                TIMER_SLIDE,
+                anim::FRAME.as_millis() as u32,
+                None,
+            )
+        };
+    }
     // SAFETY: timer on the controller window.
     unsafe { SetTimer(Some(shared.controller.get()), TIMER_PEEK, 100, None) };
     shared.invalidate_bars();
@@ -846,7 +892,65 @@ fn draw_slider(p: &Painter<'_>, pal: &Palette, row: &SliderRow, s: f32, level: f
     );
 }
 
+/// Paints the opening cover over everything drawn in its scope.
+struct CoverOnDrop<'a, 'p> {
+    p: &'a Painter<'p>,
+    rect: Rect,
+    color: Color,
+    alpha: f32,
+}
+
+impl Drop for CoverOnDrop<'_, '_> {
+    fn drop(&mut self) {
+        self.p.fill_alpha(self.rect, self.color, self.alpha);
+    }
+}
+
 impl FlyoutWin {
+    /// One frame of the opening slide.
+    fn slide_tick(&mut self, hwnd: HWND) {
+        let now = Instant::now();
+        let frame = match self.shared.flyout.try_borrow_mut() {
+            Ok(mut st) => match st.as_mut() {
+                Some(st) => {
+                    let (x, y, _, _) = place(st);
+                    let (dy, _) = slide_frame(st, now);
+                    let done = st.slide.is_none_or(|t| t.done(now));
+                    if done {
+                        st.slide = None;
+                    }
+                    Some((x, y + if done { 0 } else { dy }, done))
+                }
+                None => None,
+            },
+            Err(_) => return,
+        };
+        let done = match frame {
+            Some((x, y, done)) => {
+                // SAFETY: moving our own window; nested messages are handled.
+                let _ = unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        None,
+                        x,
+                        y,
+                        0,
+                        0,
+                        SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER,
+                    )
+                };
+                // SAFETY: repaint request on our own window.
+                let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+                done
+            }
+            None => true,
+        };
+        if done {
+            // SAFETY: our own timer.
+            let _ = unsafe { KillTimer(Some(hwnd), TIMER_SLIDE) };
+        }
+    }
+
     fn paint(&mut self, hwnd: HWND) {
         let mut ps = PAINTSTRUCT::default();
         // SAFETY: BeginPaint/EndPaint pairing in WM_PAINT.
@@ -860,8 +964,16 @@ impl FlyoutWin {
                 let s = st.scale();
                 let sys = shared.sys_status.borrow().clone();
                 let active = shared.model.borrow().active();
+                let cover = slide_frame(st, Instant::now()).1;
                 surface.draw(&shared.gfx, Color(pal.panel_bg), |p| {
                     let (w, h) = st.size;
+                    // Painted last-in-first-out: the cover goes on top below.
+                    let _cover_guard = CoverOnDrop {
+                        p,
+                        rect: Rect::new(1.0, 1.0, w - 2.0, h - 2.0),
+                        color: Color(pal.panel_bg),
+                        alpha: cover,
+                    };
                     p.stroke_rounded(
                         Rect::new(0.5, 0.5, w - 1.0, h - 1.0),
                         8.0 * s,
@@ -1634,6 +1746,10 @@ impl Handler for FlyoutWin {
         match msg {
             WM_PAINT => {
                 self.paint(hwnd);
+                Some(LRESULT(0))
+            }
+            WM_TIMER if wparam.0 == TIMER_SLIDE => {
+                self.slide_tick(hwnd);
                 Some(LRESULT(0))
             }
             WM_SIZE => {

@@ -45,6 +45,9 @@ pub struct GeneralConfig {
     pub log_keep_files: usize,
     pub theme: ThemeMode,
     pub language: crate::i18n::LanguageSetting,
+    /// Opening slides, fades and hover transitions. Also off when Windows'
+    /// "Animation effects" setting is off.
+    pub animations: bool,
 }
 
 impl Default for GeneralConfig {
@@ -54,6 +57,7 @@ impl Default for GeneralConfig {
             log_keep_files: 7,
             theme: ThemeMode::System,
             language: crate::i18n::LanguageSetting::System,
+            animations: true,
         }
     }
 }

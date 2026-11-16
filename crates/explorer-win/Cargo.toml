@@ -20,6 +20,7 @@ tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 winvd = { workspace = true, optional = true }
+windows-numerics.workspace = true
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Globalization",

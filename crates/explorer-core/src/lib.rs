@@ -5,6 +5,7 @@
 //! contains no Win32 calls: the `explorer-win` crate gathers raw data from the
 //! OS and hands it to the pure functions defined here.
 
+pub mod anim;
 pub mod calc;
 pub mod calendar;
 pub mod catalog;
@@ -38,6 +39,7 @@ pub mod system_glyphs;
 pub mod taskbar_groups;
 pub mod taskbar_layout;
 pub mod taskbar_model;
+pub mod textedit;
 pub mod theme;
 pub mod tray;
 pub mod tray_promotion;

@@ -62,7 +62,7 @@ pub struct TaskbarLayout {
     pub show_desktop: Option<Rect>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Hit {
     Start,
     Button(usize),
