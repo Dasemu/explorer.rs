@@ -78,12 +78,15 @@ fn main() {
 (For a new binary crate, e.g. `explorer-rs-desktop`, that is the whole
 `build.rs`. Use `.require_admin()` only for the installer.)
 
-For Windows MSVC targets it writes a manifest from
-`assets/manifests/app.manifest.in` and an `.rc` file into `OUT_DIR`,
-compiles them with `llvm-rc` (or `$RC`, or `rc.exe` on Windows) and links the
-`.res` into that binary only (`cargo:rustc-link-arg-bin`). On other targets
-it does nothing, so Linux builds and tests are unaffected. Without a
-resource compiler the build continues with a warning.
+For Windows MSVC targets it fills in the manifest from
+`assets/manifests/app.manifest.in` and writes a compiled resource file
+(`OUT_DIR/<bin>.res`: icon group, manifest, VERSIONINFO) directly in Rust,
+then links it into that binary only (`cargo:rustc-link-arg-bin`; link.exe
+and lld-link take `.res` files as inputs). No resource compiler is needed.
+(Earlier builds compiled an `.rc` file with `llvm-rc`/`rc.exe` and only
+warned when none was found: the binaries tested in round 2 had no manifest
+at all, hence unthemed comctl32 v5 tooltips.) On other targets it does
+nothing, so Linux builds and tests are unaffected.
 
 - **Manifest**: PerMonitorV2 DPI awareness (`dpiAware true/pm` fallback),
   Common Controls v6, `supportedOS` Windows 10/11, `longPathAware`,

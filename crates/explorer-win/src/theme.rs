@@ -88,3 +88,25 @@ pub fn ui_langid() -> u16 {
 pub fn ui_lang(setting: explorer_core::i18n::LanguageSetting) -> explorer_core::i18n::Lang {
     explorer_core::i18n::Lang::resolve(setting, ui_langid)
 }
+
+/// Whether UI animations should run: our `general.animations` setting and
+/// Windows' "Animation effects" (`SPI_GETCLIENTAREAANIMATION`).
+pub fn animations_enabled(config_on: bool) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SystemParametersInfoW, SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    };
+    if !config_on {
+        return false;
+    }
+    let mut on = windows::core::BOOL(1);
+    // SAFETY: valid out-pointer of the documented type (BOOL).
+    let ok = unsafe {
+        SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            Some(&mut on as *mut _ as *mut core::ffi::c_void),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    };
+    ok.is_err() || on.as_bool()
+}

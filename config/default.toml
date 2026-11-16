@@ -18,6 +18,10 @@ theme = "system"
 # User-interface language: "system" (Spanish if Windows is in Spanish,
 # English otherwise), "en" or "es".
 language = "system"
+# Smooth opening slides, fades and hover transitions. Windows' own
+# "Animation effects" setting (Accessibility > Visual effects) also
+# turns them off.
+animations = true
 
 [taskbar]
 # Screen edge: "bottom" or "top".

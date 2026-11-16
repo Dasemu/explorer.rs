@@ -71,6 +71,14 @@ impl Drop for WinKeyHook {
     }
 }
 
+/// Inject the inert mask key (down + up). Besides masking the Win key,
+/// this makes the calling process the last one to send input, which is
+/// what Windows requires before `AllowSetForegroundWindow` may grant the
+/// foreground to another process (the Start menu opened by the Win key).
+pub fn claim_foreground_rights() {
+    send_mask_key();
+}
+
 fn send_mask_key() {
     let key = |flags| INPUT {
         r#type: INPUT_KEYBOARD,

@@ -123,6 +123,19 @@ closed. The bar keeps `MA_NOACTIVATE`, so clicking the opener toggles the
 flyout closed; a 400 ms debounce after a deactivation-close prevents
 reopening (same idea as the Start menu's `TOGGLE_DEBOUNCE`).
 
+## Animations and tooltips
+
+Hover highlights of every bar item fade in (90 ms) and out (180 ms); all
+system glyphs share one highlight. Flyouts (window picker, "...", tray
+overflow, Quick settings, calendar) slide 16 px into place from the bar
+and fade their content in (220 ms). Frames come from a timer that only
+runs while something moves; `[general] animations = false` or Windows'
+"Animation effects" setting turns it off (`explorer_core::anim`).
+
+A click (left or right) hides the item's tooltip until the pointer moves
+to another item, as in Windows; before, "Start" stayed over the open
+Start menu.
+
 ## Threads
 
 UI thread: windows, model, painting. `taskbar-shell` (COM STA): window and

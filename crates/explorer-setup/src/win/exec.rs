@@ -378,6 +378,10 @@ impl<'a> Exec<'a> {
         remove_empty_dirs(&dir);
         if dir.exists() {
             tracing::info!(dir = %dir.display(), "install folder not empty (files in use or not ours); kept");
+            // Usually only the running uninstaller is left, deleted at
+            // reboot; the folder then goes too (a folder that still holds
+            // files at that point is simply kept).
+            sys::delete_dir_at_reboot(&dir);
         }
         Ok(())
     }

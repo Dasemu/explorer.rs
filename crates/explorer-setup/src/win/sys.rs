@@ -181,10 +181,31 @@ fn move_file(from: &Path, to: Option<&Path>, flags: u32) -> Result<()> {
     .with_context(|| format!("MoveFileExW {} -> {:?}", from.display(), to))
 }
 
+/// Files this process already scheduled for deletion at reboot (their
+/// renamed `*.old` names). A later pass over `*.old` leftovers must not
+/// rename them again (`x.0.old.0.old`) or count them twice.
+static SCHEDULED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// True if this process scheduled `path` for deletion at reboot.
+pub fn scheduled_for_reboot(path: &Path) -> bool {
+    SCHEDULED
+        .lock()
+        .map(|v| v.iter().any(|p| p == path))
+        .unwrap_or(false)
+}
+
+/// Delete an (empty) directory at the next reboot, after the files
+/// scheduled before it.
+pub fn delete_dir_at_reboot(dir: &Path) {
+    if move_file(dir, None, MOVEFILE_DELAY_UNTIL_REBOOT.0).is_ok() {
+        tracing::info!(dir = %dir.display(), "folder scheduled for removal at reboot");
+    }
+}
+
 /// Delete `path` now, or at the next reboot if it is in use. Returns true if
 /// a reboot is needed. A missing file is fine.
 pub fn delete_file(path: &Path) -> Result<bool> {
-    if !path.exists() {
+    if !path.exists() || scheduled_for_reboot(path) {
         return Ok(false);
     }
     let p = WideString::new(&path.to_string_lossy());
@@ -193,15 +214,22 @@ pub fn delete_file(path: &Path) -> Result<bool> {
         return Ok(false);
     }
     // In use (e.g. a running exe): rename out of the way first so the
-    // folder can still be removed, then delete at reboot.
+    // folder can still be removed, then delete at reboot. A leftover that
+    // already is `*.old` keeps its name.
+    let is_old = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("old"));
     let old = unique_old_name(path);
-    let target = if move_file(path, Some(&old), 0).is_ok() {
+    let target = if !is_old && move_file(path, Some(&old), 0).is_ok() {
         old
     } else {
         path.to_path_buf()
     };
     move_file(&target, None, MOVEFILE_DELAY_UNTIL_REBOOT.0)?;
     tracing::info!(path = %target.display(), "scheduled for deletion at reboot");
+    if let Ok(mut v) = SCHEDULED.lock() {
+        v.push(target);
+    }
     Ok(true)
 }
 

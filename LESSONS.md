@@ -55,6 +55,25 @@ Non-obvious findings. Add an entry whenever something surprises you.
   a v6 manifest. Use `TTTOOLINFOW` V2 size (without `lpReserved`), and call
   `InitCommonControlsEx` first, or the class does not exist.
 
+- **A missing resource compiler silently shipped binaries without a
+  manifest.** The build only printed a cargo warning, and the round-2
+  binaries had no manifest: classic yellow (comctl32 v5) tooltips, and an
+  installer that does not ask for elevation. `.res` files are simple; the
+  build script now writes them itself.
+- **`AllowSetForegroundWindow` only works for the last input sender.** A
+  click on the taskbar qualifies; the Win key does not (the key went to
+  the foreground app, the taskbar only saw it in a low-level hook).
+  Injecting an inert key first makes the taskbar the last input sender.
+- **Deleting a running uninstaller at reboot:** after renaming it to
+  `*.0.old`, the cleanup pass for `*.old` leftovers renamed it again
+  (`*.0.old.0.old`) and counted a second pending deletion, so every
+  uninstall ended with "reboot required" (exit code 3). Remember what was
+  scheduled in this run.
+- **Layered windows for fades are avoided.** It is unclear whether DWM
+  rounds the corners of `WS_EX_LAYERED` popups, and toggling the style
+  recreates the redirection surface (a blank frame). Popups slide by moving
+  the window and fade their content with a translucent cover instead.
+
 ## File index (crates/explorer-index, explorer-indexd)
 
 - **Synchronous pipe handles serialize I/O.** On a handle opened without

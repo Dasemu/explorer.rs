@@ -70,7 +70,7 @@ pub fn run(payload_bytes: &[u8]) -> i32 {
         Command::Uninstall(u) => uninstall(u, lang, log_path),
         Command::Help => exit::OK,
     };
-    tracing::info!(code, "explorer-rs-setup finished");
+    tracing::info!(code, pid = std::process::id(), "explorer-rs-setup finished");
     code
 }
 

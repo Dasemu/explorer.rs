@@ -40,11 +40,15 @@ pub struct Color(pub u32);
 
 impl Color {
     fn d2d(self) -> D2D1_COLOR_F {
+        self.d2d_alpha(1.0)
+    }
+
+    fn d2d_alpha(self, a: f32) -> D2D1_COLOR_F {
         D2D1_COLOR_F {
             r: ((self.0 >> 16) & 0xff) as f32 / 255.0,
             g: ((self.0 >> 8) & 0xff) as f32 / 255.0,
             b: (self.0 & 0xff) as f32 / 255.0,
-            a: 1.0,
+            a: a.clamp(0.0, 1.0),
         }
     }
 }
@@ -81,6 +85,8 @@ pub struct Gfx {
     dwrite: IDWriteFactory,
     icon_family: Vec<u16>,
     formats: RefCell<HashMap<(Font, u32, bool, Align), IDWriteTextFormat>>,
+    /// UTF-16 scratch buffer reused by every text draw.
+    utf16: RefCell<Vec<u16>>,
 }
 
 impl Gfx {
@@ -95,6 +101,7 @@ impl Gfx {
                 },
                 icon_family: Vec::new(),
                 formats: RefCell::new(HashMap::new()),
+                utf16: RefCell::new(Vec::with_capacity(256)),
             })
             .map(|mut g: Self| {
                 g.icon_family = g.pick_icon_family();
@@ -328,6 +335,57 @@ impl Painter<'_> {
         }
     }
 
+    /// Translucent rectangle (`alpha` 0..=1); nothing is drawn at 0.
+    pub fn fill_alpha(&self, r: Rect, c: Color, alpha: f32) {
+        if alpha <= 0.0 {
+            return;
+        }
+        // SAFETY: drawing on a target inside BeginDraw.
+        unsafe {
+            self.brush.SetColor(&c.d2d_alpha(alpha));
+            self.rt.FillRectangle(&d2r(r), self.brush);
+        }
+    }
+
+    /// Translucent rounded rectangle (`alpha` 0..=1).
+    pub fn fill_rounded_alpha(&self, r: Rect, radius: f32, c: Color, alpha: f32) {
+        if alpha <= 0.0 {
+            return;
+        }
+        // SAFETY: drawing on a target inside BeginDraw.
+        unsafe {
+            self.brush.SetColor(&c.d2d_alpha(alpha));
+            self.rt.FillRoundedRectangle(
+                &D2D1_ROUNDED_RECT {
+                    rect: d2r(r),
+                    radiusX: radius,
+                    radiusY: radius,
+                },
+                self.brush,
+            );
+        }
+    }
+
+    /// Run `f` with everything it draws moved by (dx, dy).
+    pub fn translated(&self, dx: f32, dy: f32, f: impl FnOnce(&Self)) {
+        if dx == 0.0 && dy == 0.0 {
+            f(self);
+            return;
+        }
+        let mut old = windows_numerics::Matrix3x2::identity();
+        // SAFETY: valid matrix pointers; the transform is restored below.
+        unsafe {
+            self.rt.GetTransform(&mut old);
+            let mut m = old;
+            m.M31 += dx;
+            m.M32 += dy;
+            self.rt.SetTransform(&m);
+        }
+        f(self);
+        // SAFETY: as above.
+        unsafe { self.rt.SetTransform(&old) };
+    }
+
     /// 1-px (scaled) outline of a rounded rectangle.
     pub fn stroke_rounded(&self, r: Rect, radius: f32, width: f32, c: Color) {
         // SAFETY: drawing on a target inside BeginDraw.
@@ -439,7 +497,9 @@ impl Painter<'_> {
         let Some(fmt) = self.gfx.format(font, size, bold, align) else {
             return;
         };
-        let utf16: Vec<u16> = s.encode_utf16().collect();
+        let mut utf16 = self.gfx.utf16.borrow_mut();
+        utf16.clear();
+        utf16.extend(s.encode_utf16());
         // SAFETY: drawing on a target inside BeginDraw.
         unsafe {
             self.brush.SetColor(&c.d2d());

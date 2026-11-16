@@ -7,6 +7,7 @@
 use std::rc::Rc;
 
 use anyhow::Result;
+use explorer_core::anim::{self, Fades};
 use explorer_core::config::{Combine, Edge};
 use explorer_core::flyout_layout::step_level;
 use explorer_core::i18n::{tr, trf};
@@ -40,8 +41,9 @@ use explorer_win::windows::Win32::UI::WindowsAndMessaging::{
     MF_GRAYED, MF_SEPARATOR, MF_STRING, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
     TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CLOSE,
     WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_SIZE,
-    WM_TIMER, WM_WINDOWPOSCHANGED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SIZE, WM_TIMER, WM_WINDOWPOSCHANGED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP,
 };
 
 use crate::app::Shared;
@@ -55,6 +57,8 @@ const WM_APP_POSITION: u32 = WM_APP + 3;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
 const TIMER_HOVER: usize = 10;
+/// Hover fade frames.
+const TIMER_ANIM: usize = 11;
 /// Hover delay before thumbnails appear (Windows uses ~400 ms).
 const HOVER_MS: u32 = 400;
 
@@ -159,7 +163,23 @@ pub(crate) struct Bar {
     hover: Hit,
     tracking: bool,
     tooltip: Option<Tooltip>,
+    /// The tooltip stays hidden after a click until the pointer moves to
+    /// another item (Windows does the same; otherwise "Start" floats over
+    /// the open Start menu).
+    tip_suppressed: bool,
     press: Option<Press>,
+    /// Hover highlight levels (all system glyphs share `Hit::System(0)`).
+    hover_fx: Fades<Hit>,
+    anim_timer: bool,
+}
+
+/// Key under which a hit's hover highlight animates.
+fn fx_key(h: Hit) -> Option<Hit> {
+    match h {
+        Hit::Empty => None,
+        Hit::System(_) => Some(Hit::System(0)),
+        h => Some(h),
+    }
 }
 
 const CMD_LAUNCH_NEW: u32 = 1;
@@ -225,7 +245,10 @@ impl Bar {
                 hover: Hit::Empty,
                 tracking: false,
                 tooltip: None,
+                tip_suppressed: false,
                 press: None,
+                hover_fx: Fades::default(),
+                anim_timer: false,
             }),
         )
     }
@@ -350,7 +373,6 @@ impl Bar {
         let s = self.scale();
         let pal = self.shared.palette.get();
         let clock_text = self.shared.clock_text.borrow().clone();
-        let mut hover = self.hover;
         let labels = self.shared.config.taskbar.button_labels;
         let open = flyout::open_opener(&self.shared);
         let pressed = |h: Hit| -> bool {
@@ -401,9 +423,14 @@ impl Bar {
                 centers.len(),
             )
         });
-        if drag.is_some() {
-            hover = Hit::Empty;
-        }
+        let fx = &self.hover_fx;
+        let level = |h: Hit| -> f32 {
+            if drag.is_some() {
+                0.0
+            } else {
+                fx_key(h).map_or(0.0, |k| fx.level(k))
+            }
+        };
         let l = &snap.layout;
         let full_width = {
             let mut rc = RECT::default();
@@ -419,8 +446,8 @@ impl Bar {
             let hl = |r: Rect, h: Hit| {
                 if pressed(h) {
                     p.fill_rounded(inset(r), radius, Color(pal.button_active));
-                } else if hover == h {
-                    p.fill_rounded(inset(r), radius, Color(pal.button_hover));
+                } else {
+                    p.fill_rounded_alpha(inset(r), radius, Color(pal.button_hover), level(h));
                 }
             };
             // Hairline separating the bar from the desktop.
@@ -450,13 +477,18 @@ impl Bar {
                     Some(pal.flash)
                 } else if b.active || pressed(Hit::Button(i)) {
                     Some(pal.button_active)
-                } else if hover == Hit::Button(i) {
-                    Some(pal.button_hover)
                 } else {
                     None
                 };
-                if let Some(bg) = bg {
-                    p.fill_rounded(ir, radius, Color(bg));
+                match bg {
+                    Some(bg) => p.fill_rounded(ir, radius, Color(bg)),
+                    None if !ghost => p.fill_rounded_alpha(
+                        ir,
+                        radius,
+                        Color(pal.button_hover),
+                        level(Hit::Button(i)),
+                    ),
+                    None => {}
                 }
                 let icon_size = 24.0 * s;
                 let icon = icons.get(i).cloned().flatten();
@@ -565,11 +597,15 @@ impl Bar {
 
             // System glyphs: one pill, like Windows 11's Quick settings button.
             if let Some(area) = l.system_area() {
-                let any = matches!(hover, Hit::System(_));
                 if pressed(Hit::System(0)) {
                     p.fill_rounded(inset(area), radius, Color(pal.button_active));
-                } else if any {
-                    p.fill_rounded(inset(area), radius, Color(pal.button_hover));
+                } else {
+                    p.fill_rounded_alpha(
+                        inset(area),
+                        radius,
+                        Color(pal.button_hover),
+                        level(Hit::System(0)),
+                    );
                 }
                 for (r, item) in l.system.iter().zip(snap.system.iter()) {
                     p.glyph(item.glyph, *r, 16.0 * s, Color(pal.text));
@@ -611,12 +647,11 @@ impl Bar {
 
             // Show desktop: a thin separator; highlighted on hover.
             if let Some(sd) = l.show_desktop {
-                if hover == Hit::ShowDesktop {
-                    p.fill(
-                        Rect::new(sd.x, sd.y + 1.0, sd.w, sd.h - 1.0),
-                        Color(pal.button_hover),
-                    );
-                }
+                p.fill_alpha(
+                    Rect::new(sd.x, sd.y + 1.0, sd.w, sd.h - 1.0),
+                    Color(pal.button_hover),
+                    level(Hit::ShowDesktop),
+                );
                 p.fill(
                     Rect::new(sd.x, sd.y + 12.0 * s, 1.0, sd.h - 24.0 * s),
                     Color(pal.border),
@@ -734,7 +769,10 @@ impl Bar {
     fn update_tooltip(&mut self, hwnd: HWND) {
         // Thumbnails replace the tooltip of running apps while visible.
         let peek_for_button = matches!(self.hover, Hit::Button(_)) && flyout::is_open(&self.shared);
-        let text = if peek_for_button || self.press.as_ref().is_some_and(|p| p.dragging) {
+        let text = if self.tip_suppressed
+            || peek_for_button
+            || self.press.as_ref().is_some_and(|p| p.dragging)
+        {
             None
         } else {
             self.tooltip_text(self.hover)
@@ -769,6 +807,16 @@ impl Bar {
             return;
         }
         self.hover = h;
+        self.tip_suppressed = false;
+        let animate =
+            explorer_win::theme::animations_enabled(self.shared.config.general.animations);
+        self.hover_fx
+            .set_only(fx_key(h), std::time::Instant::now(), animate);
+        if self.hover_fx.animating() && !self.anim_timer {
+            // SAFETY: timer on our own window.
+            unsafe { SetTimer(Some(hwnd), TIMER_ANIM, anim::FRAME.as_millis() as u32, None) };
+            self.anim_timer = true;
+        }
         // SAFETY: timers on our own window.
         unsafe {
             let _ = KillTimer(Some(hwnd), TIMER_HOVER);
@@ -1338,9 +1386,23 @@ impl Handler for Bar {
                 }
                 Some(LRESULT(0))
             }
-            WM_LBUTTONDOWN => {
+            WM_TIMER if wparam.0 == TIMER_ANIM => {
+                if !self.hover_fx.advance(std::time::Instant::now()) {
+                    // SAFETY: our own timer.
+                    let _ = unsafe { KillTimer(Some(hwnd), TIMER_ANIM) };
+                    self.anim_timer = false;
+                }
+                invalidate(hwnd);
+                Some(LRESULT(0))
+            }
+            WM_LBUTTONDOWN | WM_RBUTTONDOWN => {
                 // SAFETY: our own timer.
                 let _ = unsafe { KillTimer(Some(hwnd), TIMER_HOVER) };
+                self.tip_suppressed = true;
+                self.hide_tooltip();
+                if msg == WM_RBUTTONDOWN {
+                    return Some(LRESULT(0));
+                }
                 self.on_button_down(hwnd, lparam);
                 Some(LRESULT(0))
             }

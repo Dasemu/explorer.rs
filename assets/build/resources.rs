@@ -13,11 +13,12 @@
 // What it does (only when the TARGET is Windows MSVC; a no-op otherwise, so
 // Linux builds and tests are unaffected):
 //   1. writes OUT_DIR/<bin>.manifest from assets/manifests/app.manifest.in,
-//   2. writes OUT_DIR/<bin>.rc (icon, manifest, VERSIONINFO from Cargo),
-//   3. compiles it with `llvm-rc` (or `$RC`, or `rc.exe`) to <bin>.res,
-//   4. links the .res into that binary only (`cargo:rustc-link-arg-bin`).
-// If no resource compiler is found the build continues without resources
-// and prints a cargo warning. See docs/PACKAGING.md.
+//   2. writes OUT_DIR/<bin>.res (icon, manifest, VERSIONINFO from Cargo)
+//      directly in the compiled resource format, so no resource compiler
+//      is needed (a missing one used to ship binaries without manifest:
+//      unthemed comctl32 v5 tooltips, no elevation for the installer),
+//   3. links the .res into that binary only (`cargo:rustc-link-arg-bin`).
+// See docs/PACKAGING.md.
 
 #[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -53,7 +54,7 @@ impl Bin {
 
 #[allow(dead_code)]
 fn embed_resources(bins: &[Bin]) {
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let assets = manifest_dir.join("../../assets");
@@ -62,7 +63,6 @@ fn embed_resources(bins: &[Bin]) {
     println!("cargo:rerun-if-changed={}", icon.display());
     println!("cargo:rerun-if-changed={}", template.display());
     println!("cargo:rerun-if-changed=../../assets/build/resources.rs");
-    println!("cargo:rerun-if-env-changed=RC");
 
     let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
@@ -103,15 +103,6 @@ fn embed_resources(bins: &[Bin]) {
     }
     manifest_base.push_str(rest);
 
-    // rc string literal: backslashes doubled, quotes doubled.
-    fn rc_str(s: &str) -> String {
-        s.replace('\\', "\\\\").replace('"', "\"\"")
-    }
-    fn rc_path(p: &Path) -> String {
-        rc_str(&p.to_string_lossy().replace('\\', "/"))
-    }
-
-    let rc_tool = find_rc();
     for bin in bins {
         let level = match bin.level {
             Level::AsInvoker => "asInvoker",
@@ -121,101 +112,164 @@ fn embed_resources(bins: &[Bin]) {
             .replace("@NAME@", bin.name)
             .replace("@VERSION4@", &format!("{major}.{minor}.{patch}.0"))
             .replace("@LEVEL@", level);
-        let manifest_path = out.join(format!("{}.manifest", bin.name));
-        std::fs::write(&manifest_path, manifest.trim_start()).expect("write manifest");
+        let manifest = manifest.trim_start();
+        std::fs::write(out.join(format!("{}.manifest", bin.name)), manifest)
+            .expect("write manifest");
 
-        let rc = format!(
-            "#pragma code_page(65001)\n\
-             1 ICON \"{icon}\"\n\
-             1 24 \"{manifest}\"\n\
-             1 VERSIONINFO\n\
-             FILEVERSION {major},{minor},{patch},0\n\
-             PRODUCTVERSION {major},{minor},{patch},0\n\
-             FILEFLAGSMASK 0x3F\n\
-             FILEFLAGS 0x0\n\
-             FILEOS 0x40004\n\
-             FILETYPE 0x1\n\
-             FILESUBTYPE 0x0\n\
-             BEGIN\n\
-             \x20 BLOCK \"StringFileInfo\"\n\
-             \x20 BEGIN\n\
-             \x20   BLOCK \"040904B0\"\n\
-             \x20   BEGIN\n\
-             \x20     VALUE \"CompanyName\", \"explorer.rs contributors\"\n\
-             \x20     VALUE \"FileDescription\", \"{desc}\"\n\
-             \x20     VALUE \"FileVersion\", \"{version}\"\n\
-             \x20     VALUE \"InternalName\", \"{name}\"\n\
-             \x20     VALUE \"LegalCopyright\", \"GPL-3.0-or-later. Not affiliated with Microsoft.\"\n\
-             \x20     VALUE \"OriginalFilename\", \"{name}.exe\"\n\
-             \x20     VALUE \"ProductName\", \"explorer.rs\"\n\
-             \x20     VALUE \"ProductVersion\", \"{version}\"\n\
-             \x20   END\n\
-             \x20 END\n\
-             \x20 BLOCK \"VarFileInfo\"\n\
-             \x20 BEGIN\n\
-             \x20   VALUE \"Translation\", 0x409, 1200\n\
-             \x20 END\n\
-             END\n",
-            icon = rc_path(&icon),
-            manifest = rc_path(&manifest_path),
-            desc = rc_str(bin.description),
-            version = rc_str(&version),
-            name = rc_str(bin.name),
-        );
-        let rc_path_file = out.join(format!("{}.rc", bin.name));
-        let res_path = out.join(format!("{}.res", bin.name));
-        std::fs::write(&rc_path_file, rc).expect("write .rc");
-
-        let Some((tool, is_llvm)) = rc_tool.as_ref() else {
-            println!(
-                "cargo:warning=no resource compiler (llvm-rc / rc.exe / $RC) found; {} is built without icon, manifest and version info",
-                bin.name
-            );
-            continue;
-        };
-        let mut cmd = std::process::Command::new(tool);
-        if *is_llvm {
-            cmd.arg("-no-preprocess");
-        }
-        cmd.arg("/nologo")
-            .arg("/fo")
-            .arg(&res_path)
-            .arg(&rc_path_file);
-        match cmd.output() {
-            Ok(o) if o.status.success() => {
-                println!(
-                    "cargo:rustc-link-arg-bin={}={}",
-                    bin.name,
-                    res_path.display()
-                );
-            }
-            Ok(o) => panic!(
-                "resource compiler failed for {}: {}{}",
-                bin.name,
-                String::from_utf8_lossy(&o.stdout),
-                String::from_utf8_lossy(&o.stderr)
+        let ico = std::fs::read(&icon).expect("read icon");
+        let mut res = res::ResFile::new();
+        res::add_icon(&mut res, &ico);
+        res.add(24, 1, 0x0409, 0x0030, manifest.as_bytes().to_vec());
+        let strings: [(&str, String); 8] = [
+            ("CompanyName", "explorer.rs contributors".into()),
+            ("FileDescription", bin.description.into()),
+            ("FileVersion", version.clone()),
+            ("InternalName", bin.name.into()),
+            (
+                "LegalCopyright",
+                "GPL-3.0-or-later. Not affiliated with Microsoft.".into(),
             ),
-            Err(e) => panic!("could not run {}: {e}", tool.display()),
+            ("OriginalFilename", format!("{}.exe", bin.name)),
+            ("ProductName", "explorer.rs".into()),
+            ("ProductVersion", version.clone()),
+        ];
+        res.add(
+            16,
+            1,
+            0x0409,
+            0x0030,
+            res::version_info([major, minor, patch, 0], &strings),
+        );
+        let res_path = out.join(format!("{}.res", bin.name));
+        std::fs::write(&res_path, res.finish()).expect("write .res");
+        // link.exe and lld-link accept compiled .res files as inputs.
+        println!(
+            "cargo:rustc-link-arg-bin={}={}",
+            bin.name,
+            res_path.display()
+        );
+    }
+}
+
+/// Minimal writer of compiled resource (`.res`) files: the format link.exe
+/// and lld-link take directly, so no resource compiler is needed.
+#[allow(dead_code)]
+mod res {
+    fn u16s(v: &mut Vec<u8>, x: u16) {
+        v.extend_from_slice(&x.to_le_bytes());
+    }
+    fn u32s(v: &mut Vec<u8>, x: u32) {
+        v.extend_from_slice(&x.to_le_bytes());
+    }
+    fn pad4(v: &mut Vec<u8>) {
+        while v.len() % 4 != 0 {
+            v.push(0);
+        }
+    }
+    fn wstr(v: &mut Vec<u8>, s: &str) {
+        for c in s.encode_utf16() {
+            u16s(v, c);
+        }
+        u16s(v, 0);
+    }
+
+    pub struct ResFile(Vec<u8>);
+
+    impl ResFile {
+        pub fn new() -> Self {
+            // The file starts with an empty resource entry.
+            let mut r = ResFile(Vec::new());
+            r.add(0, 0, 0, 0, Vec::new());
+            r
+        }
+
+        /// Resource with numeric type and name.
+        pub fn add(&mut self, ty: u16, name: u16, lang: u16, flags: u16, data: Vec<u8>) {
+            let v = &mut self.0;
+            u32s(v, data.len() as u32);
+            u32s(v, 32); // header size
+            u16s(v, 0xFFFF);
+            u16s(v, ty);
+            u16s(v, 0xFFFF);
+            u16s(v, name);
+            u32s(v, 0); // data version
+            u16s(v, flags);
+            u16s(v, lang);
+            u32s(v, 0); // version
+            u32s(v, 0); // characteristics
+            v.extend_from_slice(&data);
+            pad4(v);
+        }
+
+        pub fn finish(self) -> Vec<u8> {
+            self.0
         }
     }
 
-    fn find_rc() -> Option<(PathBuf, bool)> {
-        let on_path = |name: &str| -> Option<PathBuf> {
-            let path = std::env::var_os("PATH")?;
-            std::env::split_paths(&path)
-                .map(|d| d.join(name))
-                .find(|p| p.is_file())
-        };
-        if let Some(rc) = std::env::var_os("RC").filter(|v| !v.is_empty()) {
-            let p = PathBuf::from(rc);
-            let llvm = p.to_string_lossy().contains("llvm-rc");
-            return Some((p, llvm));
+    /// RT_ICON images (ids 1..) and RT_GROUP_ICON 1 from an .ico file.
+    pub fn add_icon(res: &mut ResFile, ico: &[u8]) {
+        let rd16 = |o: usize| u16::from_le_bytes([ico[o], ico[o + 1]]);
+        let rd32 = |o: usize| u32::from_le_bytes([ico[o], ico[o + 1], ico[o + 2], ico[o + 3]]);
+        let count = rd16(4) as usize;
+        let mut group = Vec::new();
+        u16s(&mut group, 0);
+        u16s(&mut group, 1);
+        u16s(&mut group, count as u16);
+        for i in 0..count {
+            let e = 6 + 16 * i;
+            let size = rd32(e + 8) as usize;
+            let offset = rd32(e + 12) as usize;
+            let id = (i + 1) as u16;
+            res.add(3, id, 0x0409, 0x1010, ico[offset..offset + size].to_vec());
+            group.extend_from_slice(&ico[e..e + 8]); // w, h, colors, reserved, planes, bpp
+            u32s(&mut group, size as u32);
+            u16s(&mut group, id);
         }
-        for name in ["llvm-rc", "llvm-rc.exe"] {
-            if let Some(p) = on_path(name) {
-                return Some((p, true));
-            }
+        res.add(14, 1, 0x0409, 0x1030, group);
+    }
+
+    /// One node of the VS_VERSIONINFO tree.
+    fn node(key: &str, ty: u16, value: &[u8], value_len: u16, children: &[Vec<u8>]) -> Vec<u8> {
+        let mut v = Vec::new();
+        u16s(&mut v, 0); // length, patched below
+        u16s(&mut v, value_len);
+        u16s(&mut v, ty);
+        wstr(&mut v, key);
+        pad4(&mut v);
+        v.extend_from_slice(value);
+        for c in children {
+            pad4(&mut v);
+            v.extend_from_slice(c);
         }
-        on_path("rc.exe").map(|p| (p, false))
+        let len = v.len() as u16;
+        v[0..2].copy_from_slice(&len.to_le_bytes());
+        v
+    }
+
+    pub fn version_info(ver: [u32; 4], strings: &[(&str, String)]) -> Vec<u8> {
+        let mut fixed = Vec::new();
+        u32s(&mut fixed, 0xFEEF_04BD);
+        u32s(&mut fixed, 0x0001_0000);
+        let ms = (ver[0] << 16) | (ver[1] & 0xFFFF);
+        let ls = (ver[2] << 16) | (ver[3] & 0xFFFF);
+        for x in [ms, ls, ms, ls, 0x3F, 0, 0x0004_0004, 1, 0, 0, 0] {
+            u32s(&mut fixed, x);
+        }
+        let entries: Vec<Vec<u8>> = strings
+            .iter()
+            .map(|(k, val)| {
+                let mut w = Vec::new();
+                wstr(&mut w, val);
+                node(k, 1, &w, (w.len() / 2) as u16, &[])
+            })
+            .collect();
+        let table = node("040904B0", 1, &[], 0, &entries);
+        let sfi = node("StringFileInfo", 1, &[], 0, &[table]);
+        let mut tr = Vec::new();
+        u16s(&mut tr, 0x0409);
+        u16s(&mut tr, 1200);
+        let var = node("Translation", 0, &tr, 4, &[]);
+        let vfi = node("VarFileInfo", 1, &[], 0, &[var]);
+        node("VS_VERSION_INFO", 0, &fixed, fixed.len() as u16, &[sfi, vfi])
     }
 }

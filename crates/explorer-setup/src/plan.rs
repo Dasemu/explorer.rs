@@ -263,7 +263,17 @@ impl Step {
                 "Registering the fast file search helper",
                 "Registrando el asistente de búsqueda rápida",
             ),
-            Step::DeleteTask(_) => s("Removing scheduled tasks", "Eliminando tareas programadas"),
+            Step::DeleteTask(name) if name == crate::task_xml::LAUNCH_TASK => {
+                s("Removing the startup task", "Eliminando la tarea de inicio")
+            }
+            Step::DeleteTask(name) if name == crate::task_xml::LEGACY_INDEX_HELPER_TASK => s(
+                "Removing the task of an older version",
+                "Eliminando la tarea de una versión anterior",
+            ),
+            Step::DeleteTask(_) => s(
+                "Removing the fast file search helper task",
+                "Eliminando la tarea del asistente de búsqueda rápida",
+            ),
             Step::RunTask(_) => s(
                 "Starting the fast file search helper",
                 "Iniciando el asistente de búsqueda rápida",

@@ -80,6 +80,8 @@ Everything runs next to explorer.exe (dev mode as started by the installer, or `
 45. **Settings and tools.** Type `pantalla`, `wifi`, `bluetooth`, `fondo de pantalla`, `administrador de dispositivos`, `regedit`: Enter opens the right Settings page / tool.
 46. **Calculator.** `6*7` shows "= 42"; `1/4` shows "= 0,25"; Enter shows "Copiado" and the clipboard holds `0,25`. `14:30` and `2024` show no calculator row.
 47. **Run commands.** `>ipconfig` + Enter opens a Command Prompt running ipconfig; `%APPDATA%`, `C:\Windows` and `notepad C:\Windows\win.ini` each open. `https://example.com`, `www.example.com`, `msedge https://x` show no Run row. Ctrl+Shift+Enter on `cmd` shows a UAC prompt.
+48a. **Search box editing.** Type `14:30`, press Ctrl+A and type `pantalla`: the query is `pantalla`. Ctrl+Backspace deletes the last word. Open Start with the Win key while Notepad is focused and type: the text goes to the search box, never to Notepad.
+48b. **Animations.** Start and every flyout slide in smoothly from the taskbar; switching Home / All apps / search fades; hover highlights fade. With Settings -> Accessibility -> Visual effects -> Animation effects off (or `[general] animations = false`) everything appears instantly.
 48. **Keyboard only.** Tab goes from the search box through results, detail actions (one by one), footer buttons and back; arrows work inside grids/lists; Esc clears the query, then returns Home, then closes. The focus ring is visible after keyboard moves.
 49. **Footer and power menu.** Account picture (or person glyph) shown; File Explorer and Settings buttons open; power menu shows Lock / Sign out / Sleep / Shut down / Restart (Sleep/Hibernate hidden if unsupported) - test only Lock. "..." -> "Reiniciar el menu Inicio" restarts the launcher.
 50. **English UI.** Switch Windows to English (or `[general] language = "en"`): all Start and taskbar strings are English.
@@ -118,7 +120,7 @@ Back in a normal alongside setup (not shell mode).
 
 69. **Uninstall, keep data.** Uninstall from Installed apps with "Also remove my settings" unticked: files, shortcuts, tasks and the Installed apps entry are gone; `%APPDATA%\explorer-rs` is kept; Windows Explorer is the shell.
 70. **Uninstall, remove data.** Install again, then uninstall with the box ticked: both AppData folders are gone.
-71. **Silent install/uninstall.** `explorer-rs-setup.exe --silent --mode=none --file-search=off`, then `echo %ERRORLEVEL%` is 0; `"C:\Program Files\explorer-rs\uninstall.exe" --uninstall --silent` returns 0.
+71. **Silent install/uninstall.** `explorer-rs-setup.exe --silent --mode=none --file-search=off`, then `echo %ERRORLEVEL%` is 0; `"C:\Program Files\explorer-rs\uninstall.exe" --uninstall --silent` returns 0 (not 3), and `setup.log` has no `*.old.0.old` names.
 72. **Setup log.** `%ProgramData%\explorer-rs\setup.log` has an entry for every run and no unexplained errors.
 
 ## What to send back
