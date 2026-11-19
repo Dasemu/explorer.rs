@@ -56,6 +56,9 @@ const WM_APP_POSITION: u32 = WM_APP + 3;
 /// mode: put the bar back on top of explorer's own taskbar, which Windows
 /// raises when its Search, Start or Task view opens.
 pub(crate) const WM_APP_RAISE: u32 = WM_APP + 40;
+/// Posted by the controller when a full-screen app takes or leaves the
+/// foreground: wParam = its window (0: none), lParam = its monitor.
+pub(crate) const WM_APP_FULLSCREEN: u32 = WM_APP + 41;
 
 /// WinUser.h value; not exported by the `windows` crate module we use.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -175,8 +178,10 @@ pub(crate) struct Bar {
     /// Hover highlight levels (all system glyphs share `Hit::System(0)`).
     hover_fx: Fades<Hit>,
     anim_timer: bool,
-    /// A full-screen app is up on this monitor: stay out of its way.
-    fullscreen: bool,
+    /// Explorer reported a full-screen app (ABN_FULLSCREENAPP; dev mode).
+    abn_fullscreen: bool,
+    /// Our own detection: the full-screen window in front on this monitor.
+    fullscreen_window: Option<HWND>,
 }
 
 /// Key under which a hit's hover highlight animates.
@@ -226,6 +231,33 @@ fn shift_down() -> bool {
 }
 
 impl Bar {
+    fn in_fullscreen(&self) -> bool {
+        self.abn_fullscreen || self.fullscreen_window.is_some()
+    }
+
+    /// Topmost normally; with a full-screen app in front on this monitor,
+    /// right below it (not just non-topmost: the bar would still cover the
+    /// game until the game was activated again).
+    fn apply_z_order(&self, hwnd: HWND) {
+        let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+        // SAFETY: z-order changes on our own window; `w` may have vanished
+        // (the call then fails harmlessly).
+        unsafe {
+            match self.fullscreen_window {
+                Some(w) => {
+                    let _ = SetWindowPos(hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, flags);
+                    let _ = SetWindowPos(hwnd, Some(w), 0, 0, 0, 0, flags);
+                }
+                None if self.abn_fullscreen => {
+                    let _ = SetWindowPos(hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, flags);
+                }
+                None => {
+                    let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+                }
+            }
+        }
+    }
+
     pub fn create(shared: Rc<Shared>, m: Monitor) -> Result<HWND> {
         let rect = explorer_win::appbar::bar_rect(
             m.rect,
@@ -255,7 +287,8 @@ impl Bar {
                 press: None,
                 hover_fx: Fades::default(),
                 anim_timer: false,
-                fullscreen: false,
+                abn_fullscreen: false,
+                fullscreen_window: None,
             }),
         )
     }
@@ -366,6 +399,10 @@ impl Bar {
                 SWP_NOACTIVATE | SWP_SHOWWINDOW,
             )
         };
+        // A full-screen game that changed the resolution is still in front.
+        if self.in_fullscreen() {
+            self.apply_z_order(hwnd);
+        }
         if let Some(s) = self.surface.as_mut() {
             s.resize();
         }
@@ -1275,8 +1312,15 @@ impl Handler for Bar {
                 let _ = unsafe { PostMessageW(Some(hwnd), WM_APP_POSITION, WPARAM(0), LPARAM(0)) };
                 Some(LRESULT(0))
             }
+            WM_APP_FULLSCREEN => {
+                let win = HWND(wparam.0 as *mut core::ffi::c_void);
+                let mine = lparam.0 != 0 && lparam.0 == self.monitor.handle.0 as isize;
+                self.fullscreen_window = (mine && !win.is_invalid()).then_some(win);
+                self.apply_z_order(hwnd);
+                Some(LRESULT(0))
+            }
             WM_APP_RAISE => {
-                if !self.fullscreen {
+                if !self.in_fullscreen() {
                     // SAFETY: z-order change on our own window.
                     let _ = unsafe {
                         SetWindowPos(
@@ -1302,25 +1346,8 @@ impl Handler for Bar {
                     ABN_FULLSCREENAPP => {
                         // Step out of the way of full-screen apps (games,
                         // videos, presentations) and come back afterwards.
-                        let fullscreen = lparam.0 != 0;
-                        self.fullscreen = fullscreen;
-                        let z = if fullscreen {
-                            HWND_NOTOPMOST
-                        } else {
-                            HWND_TOPMOST
-                        };
-                        // SAFETY: z-order change on our own window.
-                        let _ = unsafe {
-                            SetWindowPos(
-                                hwnd,
-                                Some(z),
-                                0,
-                                0,
-                                0,
-                                0,
-                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                            )
-                        };
+                        self.abn_fullscreen = lparam.0 != 0;
+                        self.apply_z_order(hwnd);
                     }
                     _ => {}
                 }

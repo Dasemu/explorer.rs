@@ -17,6 +17,7 @@ pub mod dump;
 pub mod filerank;
 pub mod flyout_layout;
 pub mod fsutil;
+pub mod fullscreen;
 pub mod guardian;
 pub mod hotkey;
 pub mod i18n;
