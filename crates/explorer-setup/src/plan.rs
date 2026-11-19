@@ -43,9 +43,10 @@ pub const EDIT_CONFIG_ARGS: &str = "--edit-config";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StartMode {
     /// HKU\<sid>\...\Run value: `explorer-rs.exe --dev` next to explorer.exe.
-    #[default]
     Alongside,
-    /// Per-user Winlogon Shell = `explorer-rs.exe --shell`.
+    /// Per-user Winlogon Shell = `explorer-rs.exe --shell` (the default:
+    /// explorer.rs replaces Windows Explorer's taskbar, Start and desktop).
+    #[default]
     Shell,
     /// Installed only; started by hand from the Start menu.
     None,
@@ -87,7 +88,7 @@ pub struct PreviousInstall {
 }
 
 /// Initial choices: command line, else previous install, else defaults
-/// (alongside, fast file search on, start now).
+/// (replace the shell, fast file search on, start now).
 pub fn initial_choices(prev: Option<&PreviousInstall>, args: &crate::cli::InstallArgs) -> Choices {
     Choices {
         mode: args
@@ -839,7 +840,7 @@ mod tests {
         assert_eq!(
             initial_choices(None, &none),
             Choices {
-                mode: StartMode::Alongside,
+                mode: StartMode::Shell,
                 file_search: true,
                 launch: true
             }
