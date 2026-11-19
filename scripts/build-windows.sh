@@ -20,8 +20,13 @@
 # cargo-xwin downloads the MSVC CRT and Windows SDK on first use; doing so
 # accepts Microsoft's license terms for those components.
 #
+# On Windows itself (Git Bash, e.g. the GitHub release workflow) set
+# CARGO_BUILD="cargo build": the MSVC toolchain is used natively and
+# cargo-xwin is not needed; 7-Zip replaces zip when zip is missing.
+#
 # Usage:
 #   scripts/build-windows.sh
+#   CARGO_BUILD="cargo build" scripts/build-windows.sh   (on Windows)
 #   TASKBAR_FEATURES="quick-settings" scripts/build-windows.sh
 set -euo pipefail
 
@@ -37,14 +42,17 @@ PORTABLE="dist/explorer-rs-${VERSION}-${TARGET}"
 PAYLOAD="dist/explorer-rs-${VERSION}-payload.bin"
 SETUP_OUT="dist/explorer-rs-setup-${VERSION}-x64.exe"
 
+CARGO_BUILD="${CARGO_BUILD:-cargo xwin build}"
+read -r -a build <<< "$CARGO_BUILD"
+
 rustup target add "$TARGET" >/dev/null
 
 echo "==> Building release binaries ($TARGET)"
 taskbar_args=()
 [[ -n "$TASKBAR_FEATURES" ]] && taskbar_args=(--features "$TASKBAR_FEATURES")
-cargo xwin build --release --target "$TARGET" -p explorer-supervisor -p explorer-indexd -p explorer-desktop
-cargo xwin build --release --target "$TARGET" -p explorer-taskbar "${taskbar_args[@]}"
-cargo xwin build --release --target "$TARGET" -p explorer-launcher --features "$LAUNCHER_FEATURES"
+"${build[@]}" --release --target "$TARGET" -p explorer-supervisor -p explorer-indexd -p explorer-desktop
+"${build[@]}" --release --target "$TARGET" -p explorer-taskbar "${taskbar_args[@]}"
+"${build[@]}" --release --target "$TARGET" -p explorer-launcher --features "$LAUNCHER_FEATURES"
 # Binaries removed in earlier versions must not be picked up by the glob below.
 rm -f "$REL/explorer-rs-settings.exe"
 
@@ -72,7 +80,7 @@ cargo run --quiet --release -p explorer-setup --bin explorer-setup-pack -- \
 
 echo "==> Building installer"
 EXPLORER_RS_PAYLOAD="$(pwd)/$PAYLOAD" \
-    cargo xwin build --release --target "$TARGET" -p explorer-setup --bin explorer-rs-setup
+    "${build[@]}" --release --target "$TARGET" -p explorer-setup --bin explorer-rs-setup
 cp "$REL/explorer-rs-setup.exe" "$SETUP_OUT"
 
 echo "==> Portable zip"
@@ -82,7 +90,11 @@ for pdb in "$REL"/explorer_rs*.pdb "$REL"/explorer-rs*.pdb; do
     [[ -f "$pdb" ]] && [[ "$(basename "$pdb")" != explorer_rs_setup.pdb ]] && cp "$pdb" "$PORTABLE/"
 done
 cp docs/TESTING-ON-WINDOWS.md "$PORTABLE/"
-(cd dist && zip -qr "$(basename "$PORTABLE").zip" "$(basename "$PORTABLE")")
+if command -v zip >/dev/null; then
+    (cd dist && zip -qr "$(basename "$PORTABLE").zip" "$(basename "$PORTABLE")")
+else
+    (cd dist && 7z a -tzip -bso0 "$(basename "$PORTABLE").zip" "$(basename "$PORTABLE")")
+fi
 
 echo
 ls -l "$SETUP_OUT" "$PORTABLE.zip"

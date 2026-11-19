@@ -5,6 +5,12 @@
 //! the supervisor asks [`RestartTracker::on_exit`] what to do. Policy:
 //! - exit code [`EXIT_STOP`] (0): intentional stop, do not restart;
 //! - exit code [`EXIT_SHUTDOWN_ALL`]: the user asked to quit explorer.rs;
+//! - exit code [`EXIT_ALREADY_RUNNING`]: another instance still holds the
+//!   component's single-instance lock. Usually the previous instance is
+//!   still dying after a restart (the old supervisor's job object kills it
+//!   asynchronously), so retry a few times with a short backoff, not as a
+//!   crash; give up after [`BUSY_RETRIES`] attempts (a second copy really
+//!   is running, e.g. started by hand);
 //! - anything else (crash, panic, kill): restart with exponential backoff;
 //! - more than `crash_loop_max` crashes inside `crash_loop_window`: give up
 //!   on that component only. Other components keep running.
@@ -21,6 +27,18 @@ pub const EXIT_STOP: i32 = 0;
 pub const EXIT_SHUTDOWN_ALL: i32 = 77;
 /// Component asks to be restarted immediately (e.g. after config change).
 pub const EXIT_RESTART: i32 = 78;
+/// Another instance holds the single-instance lock (same code the
+/// supervisor itself uses towards the guardian).
+pub use crate::guardian::EXIT_ALREADY_RUNNING;
+
+/// First retry delay after [`EXIT_ALREADY_RUNNING`]; doubles up to
+/// [`BUSY_MAX_DELAY_MS`].
+pub const BUSY_INITIAL_DELAY_MS: u64 = 250;
+/// Upper bound of the [`EXIT_ALREADY_RUNNING`] retry delay.
+pub const BUSY_MAX_DELAY_MS: u64 = 4_000;
+/// Consecutive [`EXIT_ALREADY_RUNNING`] exits retried before giving up
+/// (250 ms + 0.5 s + 1 s + 2 s + 4 s + 4 s: about 12 s in total).
+pub const BUSY_RETRIES: u32 = 6;
 
 /// Exit code of a component whose message loop ended. `intentional` is the
 /// code set by a deliberate stop/quit path (quit menu, restart request,
@@ -50,6 +68,8 @@ pub struct RestartTracker {
     loop_window_ms: u64,
     crashes: VecDeque<u64>,
     consecutive: u32,
+    /// Consecutive [`EXIT_ALREADY_RUNNING`] exits.
+    busy: u32,
 }
 
 impl RestartTracker {
@@ -61,11 +81,23 @@ impl RestartTracker {
             loop_window_ms: cfg.crash_loop_window_s * 1000,
             crashes: VecDeque::new(),
             consecutive: 0,
+            busy: 0,
         }
     }
 
     /// `code` is `None` when the process was killed without an exit code.
     pub fn on_exit(&mut self, code: Option<i32>, uptime_ms: u64, now_ms: u64) -> Decision {
+        if code == Some(EXIT_ALREADY_RUNNING) {
+            self.busy = self.busy.saturating_add(1);
+            if self.busy > BUSY_RETRIES {
+                return Decision::Stop;
+            }
+            let delay = BUSY_INITIAL_DELAY_MS
+                .saturating_mul(1u64 << (self.busy - 1).min(20))
+                .min(BUSY_MAX_DELAY_MS);
+            return Decision::RestartAfter(delay);
+        }
+        self.busy = 0;
         match code {
             Some(EXIT_STOP) => return Decision::Stop,
             Some(EXIT_SHUTDOWN_ALL) => return Decision::ShutdownAll,
@@ -161,6 +193,43 @@ mod tests {
         assert_eq!(
             t.on_exit(None, HEALTHY_UPTIME_MS, 300_000),
             Decision::RestartAfter(500)
+        );
+    }
+
+    #[test]
+    fn already_running_retries_then_stops() {
+        let mut t = tracker();
+        let delays: Vec<Decision> = (0..BUSY_RETRIES as u64)
+            .map(|i| t.on_exit(Some(EXIT_ALREADY_RUNNING), 5, i))
+            .collect();
+        assert_eq!(
+            delays,
+            [250, 500, 1000, 2000, 4000, 4000].map(Decision::RestartAfter)
+        );
+        assert_eq!(t.on_exit(Some(EXIT_ALREADY_RUNNING), 5, 10), Decision::Stop);
+    }
+
+    #[test]
+    fn already_running_is_not_a_crash() {
+        let mut t = tracker();
+        // Many more busy exits than crash_loop_max inside the window never
+        // count towards the crash loop.
+        for i in 0..BUSY_RETRIES as u64 {
+            t.on_exit(Some(EXIT_ALREADY_RUNNING), 5, i);
+        }
+        assert_eq!(t.on_exit(Some(1), 10, 20), Decision::RestartAfter(500));
+    }
+
+    #[test]
+    fn already_running_streak_resets() {
+        let mut t = tracker();
+        t.on_exit(Some(EXIT_ALREADY_RUNNING), 5, 0);
+        t.on_exit(Some(EXIT_ALREADY_RUNNING), 5, 1);
+        // The instance started; later it asks for a restart.
+        t.on_exit(Some(EXIT_RESTART), 70_000, 80_000);
+        assert_eq!(
+            t.on_exit(Some(EXIT_ALREADY_RUNNING), 5, 80_001),
+            Decision::RestartAfter(BUSY_INITIAL_DELAY_MS)
         );
     }
 

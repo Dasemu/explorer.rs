@@ -51,7 +51,7 @@ impl Row {
         }
     }
 
-    pub fn file(path: PathBuf) -> Self {
+    pub fn file(path: PathBuf, is_dir: bool) -> Self {
         Self {
             name: path
                 .file_name()
@@ -59,9 +59,13 @@ impl Row {
                 .unwrap_or_else(|| path.to_string_lossy().into_owned()),
             detail: path
                 .parent()
-                .map(|d| d.to_string_lossy().into_owned())
+                .map(|d| explorer_core::filerank::short_location(&d.to_string_lossy(), 56))
                 .unwrap_or_default(),
-            kind: ResultKind::File,
+            kind: if is_dir {
+                ResultKind::Folder
+            } else {
+                ResultKind::File
+            },
             target: Target::File {
                 path,
                 recent_shortcut: None,
@@ -185,7 +189,7 @@ pub struct SearchInput<'a> {
     pub history: &'a LaunchHistory,
     pub now: u64,
     /// File results (from the index / Everything), best first.
-    pub files: &'a [PathBuf],
+    pub files: &'a [explorer_core::filerank::FileHit],
     /// A command to offer (already resolved when it names a program).
     pub command: Option<RunCommand>,
     /// Filter for settings-table entries (e.g. Terminal only if installed).
@@ -251,10 +255,10 @@ pub fn search(searcher: &mut Searcher, input: &SearchInput<'_>) -> Vec<(Section,
         });
     }
 
-    for p in input.files.iter().take(input.limits.documents) {
-        let row = Row::file(p.clone());
+    for f in input.files.iter().take(input.limits.documents) {
+        let row = Row::file(PathBuf::from(&f.path), f.is_dir);
         cands.push(Scored {
-            kind: ResultKind::File,
+            kind: row.kind,
             score: 0,
             quality: match_quality(&row.name, q),
             item: row,
@@ -326,7 +330,7 @@ mod tests {
     fn run(
         query: &str,
         lang: Lang,
-        files: &[PathBuf],
+        files: &[explorer_core::filerank::FileHit],
         cmd: Option<RunCommand>,
     ) -> Vec<(Section, Row)> {
         let c = catalog();
@@ -387,7 +391,10 @@ mod tests {
 
     #[test]
     fn files_and_commands_sections() {
-        let files = vec![PathBuf::from("C:/docs/informe.docx")];
+        let files = vec![explorer_core::filerank::FileHit {
+            path: "C:/docs/informe.docx".into(),
+            is_dir: false,
+        }];
         let r = run("informe", Lang::En, &files, None);
         assert_eq!(r[0].1.name, "informe.docx");
         assert_eq!(r[0].1.detail, "C:/docs");

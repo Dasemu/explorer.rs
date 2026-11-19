@@ -73,6 +73,8 @@ pub mod util;
 #[cfg(windows)]
 pub mod wallpaper;
 #[cfg(windows)]
+pub mod win_taskbar;
+#[cfg(windows)]
 pub mod window;
 #[cfg(windows)]
 pub mod winlist;

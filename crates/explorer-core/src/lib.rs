@@ -14,6 +14,7 @@ pub mod components;
 pub mod config;
 pub mod crashlog;
 pub mod dump;
+pub mod filerank;
 pub mod flyout_layout;
 pub mod fsutil;
 pub mod guardian;

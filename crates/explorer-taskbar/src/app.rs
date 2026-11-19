@@ -78,6 +78,9 @@ pub(crate) const TIMER_PEEK: usize = 4;
 
 /// Full re-enumeration interval: a safety net for missed notifications.
 const RESYNC_MS: u32 = 30_000;
+/// Re-hide Windows' taskbar if Explorer showed it again.
+const TIMER_HIDE_WIN_TASKBAR: usize = 41;
+const HIDE_WIN_TASKBAR_MS: u32 = 2_000;
 /// Re-read a window's AppUserModelID at most this often (apps such as
 /// Chrome set it shortly after creating the window).
 const IDENT_REFRESH: Duration = Duration::from_secs(2);
@@ -627,7 +630,9 @@ pub fn run(args: Args) -> i32 {
     }
     let Some(_instance) = explorer_win::single_instance::acquire("ExplorerRs.Taskbar") else {
         tracing::warn!("another taskbar is already running; exiting");
-        return 0;
+        // Not 0: the supervisor retries (the previous taskbar may still be
+        // dying after a restart).
+        return explorer_core::supervisor::EXIT_ALREADY_RUNNING;
     };
 
     window::init_component();
@@ -699,6 +704,8 @@ pub fn run(args: Args) -> i32 {
             taskbar_created_msg: explorer_win::ipc::registered_message("TaskbarCreated"),
             tray_started: None,
             ticks: 0,
+            win_taskbar_state: (mode == RunMode::Dev && shared.config.taskbar.hide_windows_taskbar)
+                .then(|| paths.windows_taskbar_state_file()),
         }),
     ) {
         Ok(h) => h,
@@ -712,6 +719,11 @@ pub fn run(args: Args) -> i32 {
     let _ = unsafe { PostMessageW(Some(controller), WM_APP_INIT, WPARAM(0), LPARAM(0)) };
 
     let loop_code = window::run_message_loop(|_| false);
+    // Give Windows' taskbar back on every exit path of the message loop
+    // (a crash is covered by the supervisor and the guardian).
+    if mode == RunMode::Dev {
+        explorer_win::win_taskbar::restore(&paths.windows_taskbar_state_file());
+    }
     // Release thumbnails and the tray (and its window) before COM goes away.
     shared.flyout.borrow_mut().take();
     shared.tray.borrow_mut().take();
@@ -731,6 +743,8 @@ struct Controller {
     taskbar_created_msg: u32,
     tray_started: Option<Instant>,
     ticks: u64,
+    /// Set while Windows' taskbar is to be hidden (dev mode + config).
+    win_taskbar_state: Option<std::path::PathBuf>,
 }
 
 impl Controller {
@@ -830,6 +844,17 @@ impl Controller {
             ev::EVENT_SYSTEM_FOREGROUND => {
                 self.upsert(hwnd);
                 self.apply(WindowEvent::Activated(hwnd_to_u64(hwnd)));
+                if self.win_taskbar_state.is_some() {
+                    explorer_win::win_taskbar::reassert_hidden();
+                }
+                if self.shared.mode == RunMode::Dev {
+                    for &b in self.shared.bars.borrow().iter() {
+                        // SAFETY: posting to our own window.
+                        let _ = unsafe {
+                            PostMessageW(Some(b), crate::bar::WM_APP_RAISE, WPARAM(0), LPARAM(0))
+                        };
+                    }
+                }
             }
             _ => self.upsert(hwnd),
         }
@@ -936,6 +961,10 @@ impl Handler for Controller {
                 return Some(LRESULT(0));
             }
             tracing::info!("TaskbarCreated received; rebuilding bars");
+            if let Some(f) = &self.win_taskbar_state {
+                // Explorer restarted and created a visible taskbar again.
+                explorer_win::win_taskbar::hide(f);
+            }
             self.rebuild_bars();
             if let Some(t) = self.shared.tray.borrow().as_ref() {
                 t.ensure_front();
@@ -944,6 +973,18 @@ impl Handler for Controller {
         }
         match msg {
             WM_APP_INIT => {
+                if let Some(f) = &self.win_taskbar_state {
+                    explorer_win::win_taskbar::hide(f);
+                    // SAFETY: timer on our own window.
+                    unsafe {
+                        SetTimer(
+                            Some(hwnd),
+                            TIMER_HIDE_WIN_TASKBAR,
+                            HIDE_WIN_TASKBAR_MS,
+                            None,
+                        )
+                    };
+                }
                 self.hooks = Some(ShellHooks::install(hwnd));
                 if self.shared.config.launcher.win_key_opens_launcher {
                     match WinKeyHook::install(hwnd, self.shared.mode == RunMode::Dev) {
@@ -1064,6 +1105,7 @@ impl Handler for Controller {
                         }
                     }
                     TIMER_RESYNC => self.resync(),
+                    TIMER_HIDE_WIN_TASKBAR => explorer_win::win_taskbar::reassert_hidden(),
                     TIMER_REBUILD => {
                         // SAFETY: our own timer.
                         let _ = unsafe { KillTimer(Some(hwnd), TIMER_REBUILD) };

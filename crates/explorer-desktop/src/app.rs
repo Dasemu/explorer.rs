@@ -451,7 +451,9 @@ pub fn run(args: Args) -> i32 {
     }
     let Some(_instance) = explorer_win::single_instance::acquire("ExplorerRs.Desktop") else {
         tracing::warn!("another desktop is already running; exiting");
-        return 0;
+        // Not 0: the supervisor retries (the previous desktop may still be
+        // dying after a restart).
+        return explorer_core::supervisor::EXIT_ALREADY_RUNNING;
     };
     tracing::info!(mode = mode.as_str(), "desktop starting");
     window::init_component();

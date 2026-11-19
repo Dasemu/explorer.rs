@@ -52,6 +52,7 @@ pub fn gather_facts() -> Result<Facts> {
     let install_dir = format!(r"{program_files}\{}", plan::INSTALL_DIR_NAME);
     let user_sid = explorer_win::shellreg::interactive_user_sid()
         .context("cannot determine the signed-in user")?;
+    let user_can_elevate = explorer_win::security::user_can_elevate(&user_sid);
     let (mine, other) = plan::split_sessions(&sys::processes(), sys::current_session());
     let me = std::process::id();
     let ours_running = !plan::stop_order(&mine, &install_dir, me).is_empty();
@@ -69,6 +70,7 @@ pub fn gather_facts() -> Result<Facts> {
         explorer_shell_running: explorer_win::process::explorer_shell_running(),
         ours_running,
         ours_other_sessions: foreign.len(),
+        user_can_elevate,
     })
 }
 
@@ -202,6 +204,11 @@ impl<'a> Exec<'a> {
             ),
             Step::DeleteTask(name) => explorer_win::sched::delete(name).map(|_| ()),
             Step::RunTask(name) => explorer_win::sched::run_now(name),
+            Step::Warn { .. } => {
+                let text = step.describe(self.lang);
+                self.warn(text);
+                Ok(())
+            }
             Step::CreateShortcuts(list) => {
                 let dir = PathBuf::from(&self.facts.start_menu_dir);
                 // Start clean so shortcuts named in another language vanish.

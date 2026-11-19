@@ -10,10 +10,10 @@
 //! answers with an empty list immediately, so the UI never waits on it.
 //! Unverified on Windows.
 
-use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::Duration;
 
+use explorer_core::filerank::FileHit;
 use explorer_index_client::{ClientOptions, IndexClient, Outcome, QueryFlags};
 use explorer_win::windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use explorer_win::windows::Win32::UI::WindowsAndMessaging::PostMessageW;
@@ -21,7 +21,7 @@ use explorer_win::windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 /// Handle to the worker thread.
 pub struct IndexWorker {
     tx: Sender<(u64, String)>,
-    pub results: Receiver<(u64, Vec<PathBuf>)>,
+    pub results: Receiver<(u64, Vec<FileHit>)>,
 }
 
 impl IndexWorker {
@@ -43,11 +43,19 @@ impl IndexWorker {
                     generation = g;
                     q = nq;
                 }
-                let pending = client.query(&q, 0, max, QueryFlags::default(), None);
+                let fetch = crate::files::fetch_count(max);
+                let pending = client.query(&q, 0, fetch, QueryFlags::default(), None);
                 let paths = match pending.wait(Duration::from_secs(2)) {
-                    Outcome::Ready(r) => {
-                        r.hits.into_iter().map(|h| PathBuf::from(h.path)).collect()
-                    }
+                    Outcome::Ready(r) => crate::files::rank(
+                        r.hits
+                            .into_iter()
+                            .map(|h| FileHit {
+                                path: h.path,
+                                is_dir: h.is_dir,
+                            })
+                            .collect(),
+                        max,
+                    ),
                     Outcome::Unavailable => Vec::new(),
                     other => {
                         tracing::debug!(?other, "file index query did not complete");

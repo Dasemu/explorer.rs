@@ -22,6 +22,19 @@ tests where the logic is pure, but has never run on Windows.
 | Implemented, awaiting test | No tray → tray host, with dev-mode interception |
 | Implemented, awaiting test | Theme not applied → light/dark mode and accent colour, live |
 
+## Round 3 (2560×1440 at 125 %, standard user, after PR #4)
+
+| Result | Item |
+|---|---|
+| Works | Manifests in all binaries, themed tooltips, tooltip hides on click, `blo` best match, Ctrl+A / Ctrl+Backspace, animations and `animations = false`, setup log clean |
+| Fixed, re-tested on Windows | Typed text invisible after Home → search (no `WS_CLIPCHILDREN`) |
+| Fixed, re-tested on Windows | No Start menu after Ctrl+Alt+Shift+R: a component started while the old one still held its lock exited with 0 and was never restarted → exit code 80, retried with backoff |
+| Fixed, awaiting re-test | Windows' taskbar ended up above ours after its Search opened → our bars are raised on foreground changes |
+| Fixed, awaiting re-test | "Documentos" for `blo` listed game folders as "Archivo" with identical, end-truncated paths → folders labelled, middle-shortened paths, system/app folders and deep paths outside the profile dropped, profile first |
+| Fixed, awaiting re-test | Fast file search registered for a standard user (helper cannot elevate, exits 2) → setup skips it with a warning |
+| New, awaiting test | Windows' taskbar hidden while explorer.rs runs (alongside), restored on exit / give-up / Ctrl+Alt+Shift+E |
+| New, awaiting test | GitHub Releases with the installer (`release.yml`) |
+
 ## Round 2 (release-candidate plan, Windows 11 25H2, 1 monitor at 125 %)
 
 | Result | Item |

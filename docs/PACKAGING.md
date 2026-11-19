@@ -100,6 +100,20 @@ nothing, so Linux builds and tests are unaffected.
 
 Check a build with `llvm-readobj --coff-resources <exe>`.
 
+## Releases
+
+`.github/workflows/release.yml` runs on every pushed tag `v<version>` (and
+by hand for an existing tag): on `windows-latest` it runs the tests,
+`CARGO_BUILD="cargo build" scripts/build-windows.sh` (native MSVC, no
+cargo-xwin), checks that every binary carries its manifest, and publishes a
+GitHub Release with `explorer-rs-setup-<version>-x64.exe`, the portable zip
+and `SHA256SUMS.txt`. A tag with a suffix (`v0.2.0-rc1`) is published as a
+pre-release; the tag must match the workspace version in `Cargo.toml`.
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
 ## Signing
 
 Not done yet. When a certificate exists: sign the staged `.exe` files after
