@@ -476,7 +476,12 @@ mod tests {
         );
         let w = win(20, None, Some(r"C:\WINDOWS\explorer.exe"));
         assert_eq!(match_pin(&explorer, &w), Some(MatchKind::Exe));
-        let b = build_buttons(&[explorer.clone()], &[w], Some(20), Combine::Always);
+        let b = build_buttons(
+            std::slice::from_ref(&explorer),
+            &[w],
+            Some(20),
+            Combine::Always,
+        );
         assert_eq!(b.len(), 1);
         assert_eq!(b[0].windows, vec![20]);
         // Another explorer.exe (not the system one) or another app: no.
