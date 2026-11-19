@@ -178,6 +178,8 @@ pub(crate) struct Shared {
     pub sys_status: RefCell<SysStatus>,
     pub flyout: RefCell<Option<flyout::State>>,
     pub flyout_hwnd: Cell<HWND>,
+    /// Closes a sticky flyout on a click on a window that never activates.
+    pub flyout_clicks: RefCell<Option<explorer_win::keyboard::ClickWatcher>>,
     pub flyout_closed: RefCell<Option<(flyout::Opener, Instant)>>,
     show_desktop: RefCell<ShowDesktop>,
     show_desktop_at: Cell<Option<Instant>>,
@@ -676,6 +678,7 @@ pub fn run(args: Args) -> i32 {
         sys_status: RefCell::new(SysStatus::default()),
         flyout: RefCell::new(None),
         flyout_hwnd: Cell::new(HWND::default()),
+        flyout_clicks: RefCell::new(None),
         flyout_closed: RefCell::new(None),
         show_desktop: RefCell::new(ShowDesktop::default()),
         show_desktop_at: Cell::new(None),
@@ -988,7 +991,10 @@ impl Handler for Controller {
                 self.hooks = Some(ShellHooks::install(hwnd));
                 if self.shared.config.launcher.win_key_opens_launcher {
                     match WinKeyHook::install(hwnd, self.shared.mode == RunMode::Dev) {
-                        Ok(k) => self.winkey = Some(k),
+                        Ok(k) => {
+                            tracing::info!("Win key hook installed");
+                            self.winkey = Some(k)
+                        }
                         Err(e) => {
                             tracing::warn!(error = %e, "keyboard hook failed; Win key will not open the launcher")
                         }
@@ -1017,6 +1023,7 @@ impl Handler for Controller {
                 Some(LRESULT(0))
             }
             WM_APP_WINKEY => {
+                tracing::debug!("Win key tapped: toggling the Start menu");
                 flyout::close(&self.shared);
                 // The key went to the foreground app, not to us: become the
                 // last input sender so the launcher may take the focus
