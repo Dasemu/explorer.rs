@@ -112,6 +112,7 @@ pre-release; the tag must match the workspace version in `Cargo.toml`.
 
 ```bash
 git tag v0.1.0 && git push origin v0.1.0
+# or: Actions -> Release -> Run workflow on main with tag v0.1.0
 ```
 
 ## Signing

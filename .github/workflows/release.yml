@@ -2,7 +2,8 @@
 #
 # Builds the installer and the portable zip on Windows and publishes them
 # as a GitHub Release. Runs when a version tag (v0.1.0, v0.2.0-rc1, ...)
-# is pushed, or by hand from the Actions tab for an existing tag.
+# is pushed, or by hand from the Actions tab: then it builds the branch it
+# is run on and creates the tag on that commit if it does not exist yet.
 name: Release
 
 on:
@@ -11,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to (re)build and publish, e.g. v0.1.0"
+        description: "Tag to publish, e.g. v0.1.0 (created on the selected branch's commit if missing)"
         required: true
 
 permissions:
@@ -26,8 +27,6 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
@@ -73,6 +72,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          target_commitish: ${{ github.sha }}
           name: explorer.rs ${{ github.event.inputs.tag || github.ref_name }}
           prerelease: ${{ contains(github.event.inputs.tag || github.ref_name, '-') }}
           generate_release_notes: true
