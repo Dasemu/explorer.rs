@@ -97,7 +97,9 @@ fn run_daemon(config: &Config, paths: &AppPaths) -> i32 {
         Some(g) => g,
         None => {
             tracing::warn!("another index daemon is already running; exiting");
-            return EXIT_STOP;
+            // The supervisor retries this briefly: after a restart the
+            // previous daemon may still be shutting down.
+            return explorer_core::supervisor::EXIT_ALREADY_RUNNING;
         }
     };
     let endpoint = transport::daemon_endpoint();

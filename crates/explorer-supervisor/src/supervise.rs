@@ -26,7 +26,6 @@ use std::time::{Duration, Instant, SystemTime};
 
 use explorer_core::components::{affected_by_change, components_explicit, list_diff, resolve};
 use explorer_core::config::Config;
-#[cfg(windows)]
 use explorer_core::guardian::EXIT_ALREADY_RUNNING;
 use explorer_core::guardian::{
     component_needs_fallback, EXIT_FALLBACK, GUARDED_ENV, GUARDIAN_PID_ENV, SESSION_START_ENV,
@@ -363,8 +362,18 @@ impl Supervisor {
                             let decision = c.tracker.on_exit(code, uptime, since_ms);
                             let crash = !matches!(
                                 code,
-                                Some(EXIT_STOP) | Some(EXIT_SHUTDOWN_ALL) | Some(EXIT_RESTART)
+                                Some(EXIT_STOP)
+                                    | Some(EXIT_SHUTDOWN_ALL)
+                                    | Some(EXIT_RESTART)
+                                    | Some(EXIT_ALREADY_RUNNING)
                             );
+                            if code == Some(EXIT_ALREADY_RUNNING) {
+                                if decision == Decision::Stop {
+                                    tracing::warn!(component = %c.name, "another instance keeps running; giving up on this component");
+                                } else {
+                                    tracing::info!(component = %c.name, ?decision, "previous instance still running; retrying");
+                                }
+                            }
                             if crash {
                                 c.failures_ms.push(since_ms);
                             }

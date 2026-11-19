@@ -82,7 +82,7 @@ use explorer_win::windows::Win32::UI::WindowsAndMessaging::{
     WINDOW_STYLE, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT,
     WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_SETFONT, WM_SETTINGCHANGE, WM_SIZE,
-    WM_TIMER, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    WM_TIMER, WS_CHILD, WS_CLIPCHILDREN, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::model::{self, Row, SearchInput, Target};
@@ -344,7 +344,9 @@ pub fn run(args: Args) -> i32 {
     }
     let Some(_instance) = explorer_win::single_instance::acquire("ExplorerRs.Launcher") else {
         tracing::warn!("another launcher is already running; exiting");
-        return 0;
+        // Not 0: after a restart the previous launcher may still be dying,
+        // and the supervisor must retry instead of stopping for good.
+        return explorer_core::supervisor::EXIT_ALREADY_RUNNING;
     };
     window::init_component();
     let mode = RunMode::from_env();
@@ -430,7 +432,11 @@ pub fn run(args: Args) -> i32 {
         CreateParams {
             class: LAUNCHER_WINDOW_CLASS,
             title: tr(lang, "Start", "Inicio"),
-            style: WS_POPUP,
+            // WS_CLIPCHILDREN: the search EDIT is a child window; without it
+            // every repaint of this window (each animation frame) paints the
+            // search pill over the EDIT and the typed text disappears until
+            // the next keystroke.
+            style: WS_POPUP | WS_CLIPCHILDREN,
             ex_style: WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
             rect: RECT {
                 left: 0,
