@@ -74,6 +74,21 @@ fn eq_ci(a: &str, b: &str) -> bool {
     !a.is_empty() && a.to_lowercase() == b.to_lowercase()
 }
 
+/// AUMIDs whose windows never carry them in their property store (the
+/// process sets them implicitly), with the executable those windows run,
+/// as a path suffix below the volume. File Explorer windows report only
+/// `C:\Windows\explorer.exe`, so the default File Explorer pin would
+/// otherwise get a second button next to it.
+const IMPLICIT_APP_IDS: &[(&str, &str)] =
+    &[("microsoft.windows.explorer", r"\windows\explorer.exe")];
+
+fn implicit_match(app_id: &str, exe: &str) -> bool {
+    let (id, exe) = (app_id.to_lowercase(), normalize(exe));
+    IMPLICIT_APP_IDS
+        .iter()
+        .any(|(i, suffix)| id == *i && exe.ends_with(suffix))
+}
+
 /// Does window `w` belong to pinned app `pin`?
 ///
 /// 1. Both have an AUMID: equal -> match, different -> never a match (an
@@ -90,6 +105,15 @@ pub fn match_pin(pin: &PinnedApp, w: &WindowIdent) -> Option<MatchKind> {
     }
     if let (Some(a), Some(b)) = (pin.exe_path.as_deref(), w.exe_path.as_deref()) {
         if same_path(a, b) {
+            return Some(MatchKind::Exe);
+        }
+    }
+    if let (Some(id), None, Some(exe)) = (
+        pin.app_id.as_deref(),
+        w.app_id.as_deref(),
+        w.exe_path.as_deref(),
+    ) {
+        if implicit_match(id, exe) {
             return Some(MatchKind::Exe);
         }
     }
@@ -441,6 +465,34 @@ mod tests {
             None,
         );
         assert_eq!(match_pin(&term, &win(6, None, Some(r"C:\x\w6.exe"))), None);
+    }
+
+    #[test]
+    fn file_explorer_windows_join_the_explorer_pin() {
+        let explorer = pin(
+            "Explorador de archivos",
+            Some("Microsoft.Windows.Explorer"),
+            None,
+        );
+        let w = win(20, None, Some(r"C:\WINDOWS\explorer.exe"));
+        assert_eq!(match_pin(&explorer, &w), Some(MatchKind::Exe));
+        let b = build_buttons(
+            std::slice::from_ref(&explorer),
+            &[w],
+            Some(20),
+            Combine::Always,
+        );
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].windows, vec![20]);
+        // Another explorer.exe (not the system one) or another app: no.
+        assert_eq!(
+            match_pin(&explorer, &win(21, None, Some(r"D:\tools\explorer.exe"))),
+            None
+        );
+        assert_eq!(
+            match_pin(&explorer, &win(22, None, Some(r"C:\x\a.exe"))),
+            None
+        );
     }
 
     #[test]
