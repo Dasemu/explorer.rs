@@ -157,3 +157,60 @@ pub fn enable_privilege(name: windows::core::PCWSTR) -> bool {
         }
     }
 }
+
+/// Whether the user `sid`, signed in on the console session, can run
+/// programs elevated: a UAC split token (limited or full) or, without UAC,
+/// membership of Administrators. Looks at one of that user's processes;
+/// `None` when no such process can be inspected.
+pub fn user_can_elevate(sid: &str) -> Option<bool> {
+    use windows::Win32::Security::{
+        CheckTokenMembership, CreateWellKnownSid, DuplicateToken, SecurityIdentification,
+        TokenElevationType, TokenElevationTypeDefault, WinBuiltinAdministratorsSid, PSID,
+        TOKEN_DUPLICATE, TOKEN_ELEVATION_TYPE,
+    };
+    use windows::Win32::System::RemoteDesktop::WTSGetActiveConsoleSessionId;
+    // SAFETY: plain query.
+    let console = unsafe { WTSGetActiveConsoleSessionId() };
+    let pid = crate::process::all_processes()
+        .into_iter()
+        .filter(|p| crate::process::session_of(p.pid) == Some(console))
+        .find(|p| process_user_sid(p.pid).is_ok_and(|s| s.eq_ignore_ascii_case(sid)))?
+        .pid;
+    let process = open_process(pid).ok()?;
+    let mut raw = HANDLE::default();
+    // SAFETY: valid process handle and out pointer; closed by Handle.
+    unsafe { OpenProcessToken(process.0, TOKEN_QUERY | TOKEN_DUPLICATE, &mut raw) }.ok()?;
+    let tok = Handle(raw);
+    let mut ty = TOKEN_ELEVATION_TYPE::default();
+    let mut len = 0u32;
+    // SAFETY: out buffer is a TOKEN_ELEVATION_TYPE.
+    unsafe {
+        GetTokenInformation(
+            tok.0,
+            TokenElevationType,
+            Some((&mut ty as *mut TOKEN_ELEVATION_TYPE).cast()),
+            std::mem::size_of::<TOKEN_ELEVATION_TYPE>() as u32,
+            &mut len,
+        )
+    }
+    .ok()?;
+    if ty != TokenElevationTypeDefault {
+        // Limited (filtered admin token) or full: an administrator.
+        return Some(true);
+    }
+    // No split token: a standard user, or an administrator with UAC off.
+    let mut dup = HANDLE::default();
+    // SAFETY: valid token; out pointer valid; closed by Handle.
+    unsafe { DuplicateToken(tok.0, SecurityIdentification, &mut dup) }.ok()?;
+    let dup = Handle(dup);
+    let mut sid_buf = [0u8; 68]; // SECURITY_MAX_SID_SIZE
+    let mut size = sid_buf.len() as u32;
+    let admins = PSID(sid_buf.as_mut_ptr().cast());
+    // SAFETY: buffer of SECURITY_MAX_SID_SIZE bytes.
+    unsafe { CreateWellKnownSid(WinBuiltinAdministratorsSid, None, Some(admins), &mut size) }
+        .ok()?;
+    let mut member = windows::core::BOOL(0);
+    // SAFETY: impersonation token and SID valid for the call.
+    unsafe { CheckTokenMembership(Some(dup.0), admins, &mut member) }.ok()?;
+    Some(member.as_bool())
+}

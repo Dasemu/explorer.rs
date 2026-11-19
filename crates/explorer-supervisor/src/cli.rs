@@ -139,7 +139,13 @@ pub fn guardian_main(mode: RunMode, args: &Args) -> i32 {
     #[cfg(windows)]
     let code = {
         let mut host = crate::win_host::WinHost::new(log, shell, resume, &config);
-        guardian::run(&opts, &mut host)
+        let code = guardian::run(&opts, &mut host);
+        // Whatever ended the guardian (quit, fallback, crash loop), our
+        // taskbar is gone: give Windows' own one back if we hid it.
+        explorer_win::win_taskbar::restore(
+            &explorer_core::paths::AppPaths::from_env().windows_taskbar_state_file(),
+        );
+        code
     };
     #[cfg(not(windows))]
     let code = {

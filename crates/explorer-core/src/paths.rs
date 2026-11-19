@@ -66,6 +66,12 @@ impl AppPaths {
         self.state_dir.join("taskbar-pins.toml")
     }
 
+    /// Saved state of Windows' own taskbar while explorer.rs hides it
+    /// (present only while hidden; used to restore it after a crash).
+    pub fn windows_taskbar_state_file(&self) -> PathBuf {
+        self.state_dir.join("windows-taskbar.toml")
+    }
+
     pub fn pins_file(&self) -> PathBuf {
         self.state_dir.join("pins.toml")
     }

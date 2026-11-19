@@ -17,7 +17,9 @@ Before you start:
 
 ## 1. Installer (recommended)
 
-Run `explorer-rs-setup-<version>-x64.exe`. It asks for administrator rights
+Download `explorer-rs-setup-<version>-x64.exe` from the
+[GitHub Releases](https://github.com/Dasemu/explorer.rs/releases) page
+(`SHA256SUMS.txt` next to it has the checksums) and run it. It asks for administrator rights
 (UAC), then:
 
 1. **Welcome**: version, license summary (GPL-3.0-or-later, no warranty) and a
@@ -26,7 +28,11 @@ Run `explorer-rs-setup-<version>-x64.exe`. It asks for administrator rights
    - **When should explorer.rs start?**
      - *Run alongside Windows Explorer at sign-in (recommended, default)*: adds
        a per-user `Run` entry (`"...\explorer-rs.exe" --dev`). Nothing in
-       Windows is replaced.
+       Windows is replaced. While explorer.rs runs, **Windows' own taskbar
+       is hidden** (set to auto-hide and hidden; its previous auto-hide
+       setting is saved and restored when explorer.rs stops, when our
+       taskbar stops for good, and with **Ctrl+Alt+Shift+E**). Set
+       `[taskbar] hide_windows_taskbar = false` to keep both.
      - *Replace Windows Explorer as my shell (advanced)*: registers
        explorer.rs as **your** shell (per-user Winlogon `Shell` value; the
        previous value is backed up). To go back, press **Ctrl+Alt+Shift+E** or
@@ -35,7 +41,10 @@ Run `explorer-rs-setup-<version>-x64.exe`. It asks for administrator rights
    - **Fast file search** (default on): registers the elevated index helper as
      a logon scheduled task (`\explorer-rs\IndexHelper`, see
      [ADR 0010](decisions/0010-index-privilege-model.md)) and turns on the
-     file index for explorer.rs.
+     file index for explorer.rs. The helper runs elevated as the signed-in
+     user, so it needs an **administrator** account; for a standard user
+     setup skips it with a warning and the index walks folders instead
+     (works, first scan slower).
    - **Start explorer.rs now** (default on).
    - The install folder is fixed: `%ProgramFiles%\explorer-rs`. Only
      administrators can change files there, which the elevated index helper

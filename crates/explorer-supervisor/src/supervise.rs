@@ -296,6 +296,9 @@ pub fn main(mode: RunMode, config_override: Option<&Path>, only: Option<&str>) -
         return 1;
     }
     let code = sup.run(ConfigWatch::new(config_path));
+    // Windows' taskbar is hidden only while our taskbar runs.
+    #[cfg(windows)]
+    explorer_win::win_taskbar::restore(&paths.windows_taskbar_state_file());
     tracing::info!(code, "supervisor exiting");
     code
 }
@@ -404,6 +407,15 @@ impl Supervisor {
                                     tracing::info!(component = %c.name, "shutdown requested");
                                     shutdown_all = true;
                                 }
+                            }
+                            #[cfg(windows)]
+                            if c.done && c.name == "taskbar" {
+                                // No taskbar of ours any more: never leave the
+                                // user without Windows' one.
+                                explorer_win::win_taskbar::restore(
+                                    &explorer_core::paths::AppPaths::from_env()
+                                        .windows_taskbar_state_file(),
+                                );
                             }
                         }
                         Ok(None) => {}

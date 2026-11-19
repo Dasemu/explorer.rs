@@ -656,7 +656,7 @@ struct Launcher {
     /// Result shown in the detail panel.
     detail: usize,
     detail_actions: Vec<Action>,
-    file_paths: Vec<PathBuf>,
+    file_paths: Vec<explorer_core::filerank::FileHit>,
     command: Option<RunCommand>,
     /// Bumped on every query change; stale async answers are dropped.
     generation: u64,
@@ -2847,7 +2847,7 @@ impl Launcher {
                     Align::Left,
                     big,
                 );
-                let detail = if big || row.kind == ResultKind::File {
+                let detail = if big || matches!(row.kind, ResultKind::File | ResultKind::Folder) {
                     row.detail.clone()
                 } else {
                     row.kind.label(l).to_string()

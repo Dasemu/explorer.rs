@@ -65,6 +65,10 @@ impl WinHost {
         let sink: explorer_win::session::Sink = Arc::new(move |ev| match ev {
             SysEvent::EmergencyExplorer => {
                 tracing::warn!("emergency hotkey: starting explorer.exe");
+                // Also give back Windows' own taskbar if we hid it.
+                explorer_win::win_taskbar::restore(
+                    &explorer_core::paths::AppPaths::from_env().windows_taskbar_state_file(),
+                );
                 let _ = process::start_explorer();
             }
             SysEvent::RestartAll => s.push(HostCommand::RestartAll),
@@ -278,6 +282,7 @@ pub fn restore_explorer_command(console: bool) -> i32 {
         config.general.log_keep_files,
     );
     let result = Hive::CurrentUser.restore_shell();
+    explorer_win::win_taskbar::restore(&paths.windows_taskbar_state_file());
     let guardian_pid = process::guardian_window()
         .map(process::window_pid)
         .filter(|&p| p != 0);

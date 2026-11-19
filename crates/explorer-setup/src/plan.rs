@@ -122,6 +122,12 @@ pub struct Facts {
     /// sessions (other signed-in users). They are never stopped; their
     /// files are replaced at the next restart.
     pub ours_other_sessions: usize,
+    /// Whether the signed-in user can run programs elevated (member of
+    /// Administrators). `None` when it could not be determined. The fast
+    /// file search helper task runs "with highest privileges" *as that
+    /// user*: for a standard user that means not elevated, and the helper
+    /// refuses to run (docs/decisions/0010).
+    pub user_can_elevate: Option<bool>,
 }
 
 impl Facts {
@@ -180,6 +186,11 @@ pub enum Step {
     /// `schtasks /Run /TN name`: start a just-registered task now (it
     /// would otherwise only start at the next sign-in).
     RunTask(String),
+    /// Report a warning to the user (log + Done page); never fails.
+    Warn {
+        en: String,
+        es: String,
+    },
     CreateShortcuts(Vec<Shortcut>),
     /// Values under HKLM\Software\explorer-rs.
     WriteMachineState(Vec<(String, RegValue)>),
@@ -231,6 +242,7 @@ impl Step {
             Step::RemoveStaleFiles(_)
                 | Step::DeleteTask(_)
                 | Step::RunTask(_)
+                | Step::Warn { .. }
                 | Step::Launch { .. }
                 | Step::StartExplorerIfMissing
                 | Step::RemoveUserData
@@ -274,6 +286,10 @@ impl Step {
                 "Removing the fast file search helper task",
                 "Eliminando la tarea del asistente de búsqueda rápida",
             ),
+            Step::Warn { en, es } => match lang {
+                Lang::Es => es.clone(),
+                _ => en.clone(),
+            },
             Step::RunTask(_) => s(
                 "Starting the fast file search helper",
                 "Iniciando el asistente de búsqueda rápida",
@@ -611,7 +627,16 @@ pub fn install_plan(
     steps.push(Step::InstallUninstaller);
     steps.push(Step::WriteFileManifest(manifest_files(payload_files)));
     steps.push(Step::DeleteTask(task_xml::LEGACY_INDEX_HELPER_TASK.into()));
-    if choices.file_search {
+    let helper_possible = facts.user_can_elevate != Some(false);
+    if choices.file_search && !helper_possible {
+        // The index still works (folders are walked instead of reading
+        // the MFT), just slower to build.
+        steps.push(Step::DeleteTask(task_xml::INDEX_HELPER_TASK.into()));
+        steps.push(Step::Warn {
+            en: "Fast file search needs an administrator account: the signed-in user is a standard user, so files are indexed by walking folders instead (slower first scan).".into(),
+            es: "La búsqueda rápida de archivos necesita una cuenta de administrador: el usuario que ha iniciado sesión es estándar, así que los archivos se indexan recorriendo carpetas (primer escaneo más lento).".into(),
+        });
+    } else if choices.file_search {
         steps.push(Step::CreateTask {
             name: task_xml::INDEX_HELPER_TASK.into(),
             xml: task_xml::index_helper_task(&sid, &facts.exe(INDEX_HELPER_EXE), dir),
@@ -732,7 +757,50 @@ mod tests {
             explorer_shell_running: true,
             ours_running: false,
             ours_other_sessions: 0,
+            user_can_elevate: Some(true),
         }
+    }
+
+    #[test]
+    fn standard_user_gets_no_helper_task_but_a_warning() {
+        let f = Facts {
+            user_can_elevate: Some(false),
+            ..facts()
+        };
+        let p = install_plan(
+            &f,
+            &choices(StartMode::Alongside),
+            "0.1.0",
+            &files(),
+            1,
+            &[],
+            Lang::En,
+        );
+        assert!(!p
+            .iter()
+            .any(|s| matches!(s, Step::CreateTask { .. } | Step::RunTask(_))));
+        assert!(p.contains(&Step::DeleteTask(task_xml::INDEX_HELPER_TASK.into())));
+        assert!(p.iter().any(|s| matches!(s, Step::Warn { .. })));
+        assert!(!p
+            .iter()
+            .find(|s| matches!(s, Step::Warn { .. }))
+            .unwrap()
+            .is_fatal());
+        // Unknown: keep registering it.
+        let f = Facts {
+            user_can_elevate: None,
+            ..facts()
+        };
+        let p = install_plan(
+            &f,
+            &choices(StartMode::Alongside),
+            "0.1.0",
+            &files(),
+            1,
+            &[],
+            Lang::En,
+        );
+        assert!(p.iter().any(|s| matches!(s, Step::CreateTask { .. })));
     }
 
     fn files() -> Vec<String> {

@@ -86,7 +86,7 @@ impl Api {
 /// Handle to the worker thread.
 pub struct EverythingWorker {
     tx: Sender<(u64, String)>,
-    pub results: Receiver<(u64, Vec<PathBuf>)>,
+    pub results: Receiver<(u64, Vec<explorer_core::filerank::FileHit>)>,
 }
 
 impl EverythingWorker {
@@ -107,7 +107,18 @@ impl EverythingWorker {
                     gen = g;
                     q = nq;
                 }
-                let res = api.as_ref().map(|a| a.search(&q, max)).unwrap_or_default();
+                let raw = api
+                    .as_ref()
+                    .map(|a| a.search(&q, crate::files::fetch_count(max)))
+                    .unwrap_or_default();
+                let hits = raw
+                    .into_iter()
+                    .map(|p| explorer_core::filerank::FileHit {
+                        is_dir: p.is_dir(),
+                        path: p.to_string_lossy().into_owned(),
+                    })
+                    .collect();
+                let res = crate::files::rank(hits, max);
                 if rtx.send((gen, res)).is_err() {
                     break;
                 }

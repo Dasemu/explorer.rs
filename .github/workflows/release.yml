@@ -1,0 +1,93 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Builds the installer and the portable zip on Windows and publishes them
+# as a GitHub Release. Runs when a version tag (v0.1.0, v0.2.0-rc1, ...)
+# is pushed, or by hand from the Actions tab for an existing tag.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build and publish, e.g. v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build and publish the installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check that the tag matches the version
+        shell: bash
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          version="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+          case "$TAG" in
+            "v$version"|"v$version"-*) ;;
+            *) echo "tag $TAG does not match Cargo version $version" >&2; exit 1 ;;
+          esac
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build installer and portable zip
+        shell: bash
+        env:
+          CARGO_BUILD: cargo build
+        run: scripts/build-windows.sh
+
+      - name: Check the embedded manifests
+        shell: pwsh
+        run: |
+          foreach ($f in Get-ChildItem dist/explorer-rs-setup-*.exe, target/x86_64-pc-windows-msvc/release/explorer-rs*.exe) {
+            $bytes = [IO.File]::ReadAllBytes($f.FullName)
+            $text = [Text.Encoding]::ASCII.GetString($bytes)
+            if (-not $text.Contains("Microsoft.Windows.Common-Controls")) { throw "$($f.Name) has no manifest" }
+          }
+
+      - name: Checksums
+        shell: bash
+        run: |
+          cd dist
+          sha256sum explorer-rs-setup-*.exe explorer-rs-*-x86_64-pc-windows-msvc.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: explorer.rs ${{ github.event.inputs.tag || github.ref_name }}
+          prerelease: ${{ contains(github.event.inputs.tag || github.ref_name, '-') }}
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            Download `explorer-rs-setup-*-x64.exe` and run it (it asks for administrator rights).
+            By default explorer.rs runs **alongside Windows Explorer** and **hides the Windows taskbar**
+            while it runs (`[taskbar] hide_windows_taskbar` in `%APPDATA%\explorer-rs\config.toml`).
+            Silent install: `explorer-rs-setup-<version>-x64.exe --silent --mode=alongside --file-search=on`.
+
+            If something goes wrong: **Ctrl+Alt+Shift+E** brings Windows Explorer and its taskbar back.
+            See `RECOVERY.md` in the portable zip.
+          files: |
+            dist/explorer-rs-setup-*-x64.exe
+            dist/explorer-rs-*-x86_64-pc-windows-msvc.zip
+            dist/SHA256SUMS.txt
+          fail_on_unmatched_files: true

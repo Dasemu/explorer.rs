@@ -27,7 +27,7 @@ interrupted install. It is harmless: the scripts treat it as "no backup".
 
 | Keys | Effect |
 |---|---|
-| `Ctrl+Alt+Shift+E` | Start `explorer.exe` immediately. |
+| `Ctrl+Alt+Shift+E` | Start `explorer.exe` immediately and show Windows' taskbar again if explorer.rs hid it. |
 | `Ctrl+Alt+Shift+R` | Restart explorer.rs (supervisor and every component). |
 
 The keys are registered by the guardian process (`explorer-rs.exe --dev` or
@@ -35,6 +35,18 @@ The keys are registered by the guardian process (`explorer-rs.exe --dev` or
 keep working while the taskbar or launcher is crashing. If another program
 already owns a key combination, registration fails and an error is written to
 `%LOCALAPPDATA%\explorer-rs\logs\guardian.*.log`.
+
+### Windows' taskbar hidden (alongside mode)
+
+With `[taskbar] hide_windows_taskbar = true` (default) explorer.rs hides
+Windows' taskbar while its own runs. Before changing anything it writes
+`%LOCALAPPDATA%\explorer-rs\state\windows-taskbar.toml` with the previous
+auto-hide setting; that file exists exactly while the taskbar is hidden.
+It is restored by the taskbar on exit, by the supervisor when the taskbar
+stops for good or the supervisor exits, by the guardian when it ends, by
+`--restore-explorer` and by Ctrl+Alt+Shift+E. By hand: Settings ->
+Personalization -> Taskbar -> Taskbar behaviors -> untick "Automatically
+hide the taskbar", then restart Windows Explorer from Task Manager.
 
 ### Automatic restarts and fallback
 

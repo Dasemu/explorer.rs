@@ -52,6 +52,10 @@ use crate::workers::SysCmd;
 
 const WM_APP_APPBAR: u32 = WM_APP + 2;
 const WM_APP_POSITION: u32 = WM_APP + 3;
+/// Posted by the controller when the foreground window changes in dev
+/// mode: put the bar back on top of explorer's own taskbar, which Windows
+/// raises when its Search, Start or Task view opens.
+pub(crate) const WM_APP_RAISE: u32 = WM_APP + 40;
 
 /// WinUser.h value; not exported by the `windows` crate module we use.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -171,6 +175,8 @@ pub(crate) struct Bar {
     /// Hover highlight levels (all system glyphs share `Hit::System(0)`).
     hover_fx: Fades<Hit>,
     anim_timer: bool,
+    /// A full-screen app is up on this monitor: stay out of its way.
+    fullscreen: bool,
 }
 
 /// Key under which a hit's hover highlight animates.
@@ -249,6 +255,7 @@ impl Bar {
                 press: None,
                 hover_fx: Fades::default(),
                 anim_timer: false,
+                fullscreen: false,
             }),
         )
     }
@@ -1268,6 +1275,23 @@ impl Handler for Bar {
                 let _ = unsafe { PostMessageW(Some(hwnd), WM_APP_POSITION, WPARAM(0), LPARAM(0)) };
                 Some(LRESULT(0))
             }
+            WM_APP_RAISE => {
+                if !self.fullscreen {
+                    // SAFETY: z-order change on our own window.
+                    let _ = unsafe {
+                        SetWindowPos(
+                            hwnd,
+                            Some(HWND_TOPMOST),
+                            0,
+                            0,
+                            0,
+                            0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                        )
+                    };
+                }
+                Some(LRESULT(0))
+            }
             WM_APP_POSITION => {
                 self.position(hwnd);
                 Some(LRESULT(0))
@@ -1279,6 +1303,7 @@ impl Handler for Bar {
                         // Step out of the way of full-screen apps (games,
                         // videos, presentations) and come back afterwards.
                         let fullscreen = lparam.0 != 0;
+                        self.fullscreen = fullscreen;
                         let z = if fullscreen {
                             HWND_NOTOPMOST
                         } else {

@@ -130,6 +130,9 @@ pub struct TaskbarConfig {
     pub exclude_classes: Vec<String>,
     pub exclude_processes: Vec<String>,
     pub combine: Combine,
+    /// Alongside Windows Explorer: hide Windows' own taskbar while ours
+    /// runs (restored when explorer.rs stops). No effect in shell mode.
+    pub hide_windows_taskbar: bool,
 }
 
 impl Default for TaskbarConfig {
@@ -148,6 +151,7 @@ impl Default for TaskbarConfig {
             exclude_classes: Vec::new(),
             exclude_processes: Vec::new(),
             combine: Combine::Always,
+            hide_windows_taskbar: true,
         }
     }
 }

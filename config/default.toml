@@ -52,6 +52,10 @@ exclude_processes = []
 # Windows 11 "Combine taskbar buttons": "always" (one button per app; several
 # windows open a thumbnail picker) or "never" (one button per window).
 combine = "always"
+# Alongside Windows Explorer: hide Windows' own taskbar while the explorer.rs
+# taskbar runs. It comes back (with its previous auto-hide setting) when
+# explorer.rs stops, crashes for good, or with Ctrl+Alt+Shift+E.
+hide_windows_taskbar = true
 
 [tray]
 # Show the notification area (system tray) on the primary monitor's taskbar.

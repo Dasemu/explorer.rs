@@ -123,6 +123,17 @@ closed. The bar keeps `MA_NOACTIVATE`, so clicking the opener toggles the
 flyout closed; a 400 ms debounce after a deactivation-close prevents
 reopening (same idea as the Start menu's `TOGGLE_DEBOUNCE`).
 
+## Windows' taskbar (alongside mode)
+
+`[taskbar] hide_windows_taskbar = true` (default): at start-up the taskbar
+switches Windows' taskbar to auto-hide (releasing its screen space) and
+hides every `Shell_TrayWnd` / `Shell_SecondaryTrayWnd` of Explorer; it
+hides them again every 2 s, on foreground changes and after Explorer
+restarts (`TaskbarCreated`). Our own bar is put back on top on every
+foreground change (Explorer raises its taskbar when its Search or Task
+view opens). See RECOVERY.md for how it is restored
+(`explorer_win::win_taskbar`).
+
 ## Animations and tooltips
 
 Hover highlights of every bar item fade in (90 ms) and out (180 ms); all
