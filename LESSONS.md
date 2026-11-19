@@ -204,3 +204,8 @@ Non-obvious findings. Add an entry whenever something surprises you.
   ownership for Administrators (SeTakeOwnership/SeRestore), reset a
   protected DACL, and wipe the contents of a folder that was not owned by
   Administrators/SYSTEM before.
+- **Child windows created without WS_VISIBLE stay hidden.** The setup
+  wizard shipped in v0.1.0 with only "Cancel" on screen: Next/Install was
+  never shown (Enter still worked through IsDialogMessage, so silent and
+  keyboard runs passed). Every control the page logic does not show must be
+  shown explicitly, and the interactive wizard is part of every Windows test.

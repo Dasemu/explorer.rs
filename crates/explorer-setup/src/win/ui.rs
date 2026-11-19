@@ -888,6 +888,9 @@ impl Wizard {
         enable(self.next, page != Page::Progress);
         // SAFETY: valid windows.
         unsafe {
+            // Buttons are created hidden (no WS_VISIBLE) and are not in
+            // `ctls`, so each one is shown here explicitly.
+            let _ = ShowWindow(self.next, SW_SHOW);
             let _ = ShowWindow(self.back, if back { SW_SHOW } else { SW_HIDE });
             let _ = ShowWindow(
                 self.cancel,
