@@ -26,16 +26,18 @@ Download `explorer-rs-setup-<version>-x64.exe` from the
    note that explorer.rs is not affiliated with Microsoft.
 2. **Options**
    - **When should explorer.rs start?**
-     - *Run alongside Windows Explorer at sign-in (recommended, default)*: adds
+     - *Run alongside Windows Explorer at sign-in*: adds
        a per-user `Run` entry (`"...\explorer-rs.exe" --dev`). Nothing in
        Windows is replaced. While explorer.rs runs, **Windows' own taskbar
        is hidden** (set to auto-hide and hidden; its previous auto-hide
        setting is saved and restored when explorer.rs stops, when our
        taskbar stops for good, and with **Ctrl+Alt+Shift+E**). Set
        `[taskbar] hide_windows_taskbar = false` to keep both.
-     - *Replace Windows Explorer as my shell (advanced)*: registers
-       explorer.rs as **your** shell (per-user Winlogon `Shell` value; the
-       previous value is backed up). To go back, press **Ctrl+Alt+Shift+E** or
+     - *Replace Windows Explorer as my shell (recommended, default)*:
+       registers explorer.rs as **your** shell (per-user Winlogon `Shell`
+       value; the previous value is backed up). It takes over completely at
+       your next sign-in; until then it runs next to Windows Explorer with
+       Windows' taskbar hidden. To go back, press **Ctrl+Alt+Shift+E** or
        run **Restore Windows Explorer** from the Start menu.
      - *Don't start automatically*: start it from the Start menu.
    - **Fast file search** (default on): registers the elevated index helper as

@@ -404,12 +404,12 @@ impl Wizard {
                 ID_R_ALONG,
                 ID_L_ALONG,
                 s(
-                    "Run alongside Windows Explorer at sign-in (recommended)",
-                    "Ejecutar junto al Explorador de Windows al iniciar sesión (recomendado)",
+                    "Run alongside Windows Explorer at sign-in",
+                    "Ejecutar junto al Explorador de Windows al iniciar sesión",
                 ),
                 s(
-                    "Adds the explorer.rs taskbar and Start menu. Nothing in Windows is replaced.",
-                    "Añade la barra de tareas y el menú Inicio de explorer.rs. No se reemplaza nada de Windows.",
+                    "Adds the explorer.rs taskbar and Start menu and hides Windows' taskbar while they run. Nothing in Windows is replaced.",
+                    "Añade la barra de tareas y el menú Inicio de explorer.rs y oculta la barra de Windows mientras funcionan. No se reemplaza nada de Windows.",
                 ),
                 Role::Sub,
             ),
@@ -417,8 +417,8 @@ impl Wizard {
                 ID_R_SHELL,
                 ID_L_SHELL,
                 s(
-                    "Replace Windows Explorer as my shell (advanced)",
-                    "Reemplazar el Explorador de Windows como mi shell (avanzado)",
+                    "Replace Windows Explorer as my shell (recommended)",
+                    "Reemplazar el Explorador de Windows como mi shell (recomendado)",
                 ),
                 s(
                     "Windows Explorer will no longer start when you sign in. To get it back, press Ctrl+Alt+Shift+E or run \"Restore Windows Explorer\" from the Start menu.",

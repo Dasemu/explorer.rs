@@ -80,9 +80,10 @@ jobs:
             ## Install
 
             Download `explorer-rs-setup-*-x64.exe` and run it (it asks for administrator rights).
-            By default explorer.rs runs **alongside Windows Explorer** and **hides the Windows taskbar**
-            while it runs (`[taskbar] hide_windows_taskbar` in `%APPDATA%\explorer-rs\config.toml`).
-            Silent install: `explorer-rs-setup-<version>-x64.exe --silent --mode=alongside --file-search=on`.
+            By default it **replaces Windows Explorer as your shell** (taskbar, Start menu and desktop) from
+            your next sign-in; until then it runs next to Windows Explorer with the Windows taskbar hidden.
+            The installer also offers running alongside Windows Explorer instead.
+            Silent install: `explorer-rs-setup-<version>-x64.exe --silent` (shell mode) or add `--mode=alongside`.
 
             If something goes wrong: **Ctrl+Alt+Shift+E** brings Windows Explorer and its taskbar back.
             See `RECOVERY.md` in the portable zip.
