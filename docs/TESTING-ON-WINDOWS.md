@@ -99,6 +99,7 @@ Only in a VM with a snapshot, with a second admin account and [RECOVERY.md](RECO
 
 58. **Register shell mode.** Run the installer and choose Replace (or `powershell -ExecutionPolicy Bypass -File .\scripts\install-shell.ps1`, type `YES`). Sign out and in: explorer.rs is the shell; the taskbar appears, the Win key opens Start, apps launch, killing a component recovers it, and the sign-in animation ends promptly.
 58a. **Shell mode after sign-in.** Right after signing in again (no waiting): tap the Win key: Start opens; tap again: it closes. Open Start, then click the wallpaper, then the empty taskbar: it closes each time. Open the clock or quick settings flyout and click the wallpaper: it closes. `taskbar.*.log` shows "Win key hook installed" and, if Windows dropped the hook during sign-in, "input hooks were not called ... installing them again" followed by a working Win key.
+58b. **Full-screen games and videos.** In shell mode: start a game in full screen (exclusive and borderless if it offers both) and a YouTube video in full screen (F11 or the video's button): the taskbar is not visible over them. Alt+Tab to another window: the taskbar is back. With two monitors, the other monitor's taskbar stays. `taskbar.*.log` shows "full-screen app in front" / "gone".
 59. **Startup apps.** Apps from the Run keys and `shell:startup` start (tray icons appear); an app disabled in Settings -> Apps -> Startup does not; a `RunOnce` value runs once and is gone. Apps that depend on `GetShellWindow` work.
 60. **Wallpaper desktop.** The wallpaper window sits behind all windows and follows Settings -> Personalization -> Background (each fit style, a solid colour, two monitors with "span"). Its right-click menu works in the UI language. (Also testable in dev mode with `[desktop] enabled = "always"`; set it back to `"shell"`.)
 61. **Emergency hotkeys.** Ctrl+Alt+Shift+E opens a File Explorer window. Ctrl+Alt+Shift+R: taskbar and Start disappear briefly and come back.
@@ -209,6 +210,7 @@ Installer / binaries: <file name or git commit>
 ## Phase C: Shell mode (VM only)
 58 Register shell mode: PASS / FAIL / notes:
 58a Shell mode after sign-in: PASS / FAIL / notes:
+58b Full-screen games and videos: PASS / FAIL / notes:
 59 Startup apps: PASS / FAIL / notes:
 60 Wallpaper desktop: PASS / FAIL / notes:
 61 Emergency hotkeys: PASS / FAIL / notes:

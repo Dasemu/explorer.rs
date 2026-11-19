@@ -80,6 +80,10 @@ pub(crate) const TIMER_PEEK: usize = 4;
 const RESYNC_MS: u32 = 30_000;
 /// Re-hide Windows' taskbar if Explorer showed it again.
 const TIMER_HIDE_WIN_TASKBAR: usize = 41;
+/// Re-checks whether the foreground window is full screen (games often
+/// switch after they were activated).
+const TIMER_FULLSCREEN: usize = 42;
+const FULLSCREEN_CHECK_MS: u32 = 500;
 const HIDE_WIN_TASKBAR_MS: u32 = 2_000;
 /// Re-read a window's AppUserModelID at most this often (apps such as
 /// Chrome set it shortly after creating the window).
@@ -709,6 +713,7 @@ pub fn run(args: Args) -> i32 {
             ticks: 0,
             win_taskbar_state: (mode == RunMode::Dev && shared.config.taskbar.hide_windows_taskbar)
                 .then(|| paths.windows_taskbar_state_file()),
+            fullscreen: None,
         }),
     ) {
         Ok(h) => h,
@@ -748,9 +753,38 @@ struct Controller {
     ticks: u64,
     /// Set while Windows' taskbar is to be hidden (dev mode + config).
     win_taskbar_state: Option<std::path::PathBuf>,
+    /// Last full-screen foreground window and its monitor (as integers).
+    fullscreen: Option<(isize, isize)>,
 }
 
 impl Controller {
+    /// Tell the bars when a full-screen app takes or leaves the foreground.
+    /// Explorer's AppBar manager does that with ABN_FULLSCREENAPP, but it is
+    /// not there when explorer.rs is the shell.
+    fn check_fullscreen(&mut self, force: bool) {
+        let now = explorer_win::winlist::fullscreen_foreground()
+            .map(|(w, m)| (w.0 as isize, m.0 as isize));
+        if now == self.fullscreen && !force {
+            return;
+        }
+        if now != self.fullscreen {
+            tracing::info!(window = ?now.map(|n| n.0), "full-screen app {}", if now.is_some() { "in front" } else { "gone" });
+        }
+        self.fullscreen = now;
+        let (win, mon) = now.unwrap_or((0, 0));
+        for &b in self.shared.bars.borrow().iter() {
+            // SAFETY: posting to our own window.
+            let _ = unsafe {
+                PostMessageW(
+                    Some(b),
+                    crate::bar::WM_APP_FULLSCREEN,
+                    WPARAM(win as usize),
+                    LPARAM(mon),
+                )
+            };
+        }
+    }
+
     fn rebuild_bars(&mut self) {
         flyout::close(&self.shared);
         let old: Vec<HWND> = self.shared.bars.borrow_mut().drain(..).collect();
@@ -770,6 +804,8 @@ impl Controller {
                 Err(e) => tracing::error!(error = %e, "cannot create bar window"),
             }
         }
+        // New bars start topmost: tell them about a full-screen app.
+        self.check_fullscreen(true);
     }
 
     fn changed(&mut self) {
@@ -847,6 +883,7 @@ impl Controller {
             ev::EVENT_SYSTEM_FOREGROUND => {
                 self.upsert(hwnd);
                 self.apply(WindowEvent::Activated(hwnd_to_u64(hwnd)));
+                self.check_fullscreen(false);
                 if self.win_taskbar_state.is_some() {
                     explorer_win::win_taskbar::reassert_hidden();
                 }
@@ -1015,6 +1052,7 @@ impl Handler for Controller {
                 unsafe {
                     SetTimer(Some(hwnd), TIMER_CLOCK, 1000, None);
                     SetTimer(Some(hwnd), TIMER_RESYNC, RESYNC_MS, None);
+                    SetTimer(Some(hwnd), TIMER_FULLSCREEN, FULLSCREEN_CHECK_MS, None);
                 }
                 Some(LRESULT(0))
             }
@@ -1112,6 +1150,7 @@ impl Handler for Controller {
                         }
                     }
                     TIMER_RESYNC => self.resync(),
+                    TIMER_FULLSCREEN => self.check_fullscreen(false),
                     TIMER_HIDE_WIN_TASKBAR => explorer_win::win_taskbar::reassert_hidden(),
                     TIMER_REBUILD => {
                         // SAFETY: our own timer.

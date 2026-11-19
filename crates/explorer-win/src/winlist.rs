@@ -161,3 +161,37 @@ pub fn dump(rules: &explorer_core::window_filter::FilterRules) -> String {
     }
     s
 }
+
+/// The foreground window and its monitor, if it is a full-screen app (see
+/// [`explorer_core::fullscreen`]). Windows of this process never count.
+pub fn fullscreen_foreground() -> Option<(HWND, windows::Win32::Graphics::Gdi::HMONITOR)> {
+    use explorer_core::fullscreen::{is_fullscreen, ScreenRect};
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONULL};
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect};
+    // SAFETY: plain queries on a window handle that may vanish meanwhile
+    // (every call then fails harmlessly).
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.is_invalid() || IsIconic(fg).as_bool() || cloaked(fg) != 0 {
+            return None;
+        }
+        if crate::process::window_pid(fg) == std::process::id() {
+            return None;
+        }
+        let mut r = RECT::default();
+        GetWindowRect(fg, &mut r).ok()?;
+        let mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONULL);
+        if mon.is_invalid() {
+            return None;
+        }
+        let m = crate::monitors::query(mon)?;
+        let sr = |r: RECT| ScreenRect {
+            left: r.left,
+            top: r.top,
+            right: r.right,
+            bottom: r.bottom,
+        };
+        is_fullscreen(&class_name(fg), sr(r), sr(m.rect)).then_some((fg, mon))
+    }
+}

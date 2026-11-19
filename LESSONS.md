@@ -220,3 +220,9 @@ Non-obvious findings. Add an entry whenever something surprises you.
   behind them, so a click there never deactivated the Start menu. Popups
   also watch button presses (a mouse hook installed only while open) and
   close on a click on another process's window.
+- **ABN_FULLSCREENAPP comes from Explorer.** The AppBar manager that sends
+  it lives in explorer.exe; with explorer.rs as the shell, full-screen games
+  stayed under the taskbar. Detect it ourselves (foreground window covering
+  its monitor, on activation and on a short timer), and put the bar right
+  below that window: HWND_NOTOPMOST alone still covers the game until it is
+  activated again.
