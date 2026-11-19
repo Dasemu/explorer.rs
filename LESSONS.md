@@ -209,3 +209,14 @@ Non-obvious findings. Add an entry whenever something surprises you.
   never shown (Enter still worked through IsDialogMessage, so silent and
   keyboard runs passed). Every control the page logic does not show must be
   shown explicitly, and the interactive wizard is part of every Windows test.
+- **Low-level hooks die silently on busy threads.** Windows removes a
+  WH_KEYBOARD_LL / WH_MOUSE_LL hook whose callback exceeds
+  `LowLevelHooksTimeout`, without telling anyone. On the taskbar's UI thread
+  that happened during sign-in in shell mode (the Win key stopped working).
+  Host such hooks on a thread that does nothing else, and watch them:
+  `GetLastInputInfo` newer than the last event a hook saw means it is gone.
+- **"Close on deactivate" needs something that activates.** Our desktop and
+  taskbar are WS_EX_NOACTIVATE; in shell mode there is no Explorer desktop
+  behind them, so a click there never deactivated the Start menu. Popups
+  also watch button presses (a mouse hook installed only while open) and
+  close on a click on another process's window.

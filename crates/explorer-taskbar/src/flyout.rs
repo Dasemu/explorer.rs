@@ -73,6 +73,8 @@ const SLIDE: f32 = 16.0;
 
 /// WinUser.h value; not exported by the `windows` crate module we use.
 const WM_MOUSELEAVE: u32 = 0x02A3;
+/// A mouse button went down somewhere while a sticky flyout is open.
+const WM_APP_CLICK: u32 = explorer_win::windows::Win32::UI::WindowsAndMessaging::WM_APP + 50;
 
 /// Ignore a toggle of the same opener this soon after a deactivation
 /// closed it (same value as the Start menu's TOGGLE_DEBOUNCE).
@@ -237,6 +239,10 @@ pub(crate) fn create_window(shared: &Rc<Shared>) {
                 )
             };
             shared.flyout_hwnd.set(h);
+            match explorer_win::keyboard::ClickWatcher::start(h, WM_APP_CLICK) {
+                Ok(c) => *shared.flyout_clicks.borrow_mut() = Some(c),
+                Err(e) => tracing::warn!(error = %e, "cannot start the flyout click watcher"),
+            }
         }
         Err(e) => tracing::error!(error = %e, "cannot create the flyout window"),
     }
@@ -355,6 +361,9 @@ pub(crate) fn close(shared: &Shared) {
     }
     // Unregister thumbnails before hiding.
     drop(st);
+    if let Some(c) = shared.flyout_clicks.borrow().as_ref() {
+        c.arm(false);
+    }
     let h = shared.flyout_hwnd.get();
     if !h.is_invalid() {
         // SAFETY: hiding our own window; nested messages are harmless.
@@ -669,6 +678,9 @@ fn show_window(shared: &Shared, activate: bool) {
     register_thumbs(shared, hwnd);
     if activate {
         explorer_win::activate::force_foreground(hwnd);
+        if let Some(c) = shared.flyout_clicks.borrow().as_ref() {
+            c.arm(true);
+        }
     }
     // SAFETY: repaint request on our own window.
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
@@ -1770,6 +1782,17 @@ impl Handler for FlyoutWin {
                     // Hover thumbnails never take activation.
                     Some(LRESULT(MA_NOACTIVATE as isize))
                 }
+            }
+            WM_APP_CLICK => {
+                // A click on another process's window (our desktop never
+                // activates, so WM_ACTIVATE below does not see it).
+                let pt = explorer_win::keyboard::click_point(lparam);
+                // SAFETY: plain query on our own window.
+                let visible = unsafe { IsWindowVisible(hwnd) }.as_bool();
+                if visible && self.sticky() && explorer_win::keyboard::click_is_foreign(pt) {
+                    close(&self.shared);
+                }
+                Some(LRESULT(0))
             }
             WM_ACTIVATE => {
                 // Lost activation (click elsewhere): close a sticky flyout.

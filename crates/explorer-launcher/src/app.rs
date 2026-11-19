@@ -94,6 +94,8 @@ const WM_APP_NAVKEY: u32 = WM_APP + 11;
 #[cfg(any(feature = "everything", feature = "file-index"))]
 const WM_APP_FILES: u32 = WM_APP + 12;
 const WM_APP_WORKER: u32 = WM_APP + 13;
+/// A mouse button went down somewhere while the menu is open.
+const WM_APP_CLICK: u32 = WM_APP + 14;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
 const EN_CHANGE: u32 = 0x0300;
@@ -419,6 +421,7 @@ pub fn run(args: Args) -> i32 {
         last_mouse: None,
         tooltip: None,
         tooltip_for: None,
+        clicks: None,
         anim_on: true,
         anim_timer: false,
         open_anim: None,
@@ -696,6 +699,9 @@ struct Launcher {
     last_mouse: Option<(i32, i32)>,
     tooltip: Option<Tooltip>,
     tooltip_for: Option<Hit>,
+    /// Closes the menu on a click on a window that never activates (our
+    /// desktop and taskbar), which WM_ACTIVATE does not see.
+    clicks: Option<explorer_win::keyboard::ClickWatcher>,
     // Animations (see explorer_core::anim).
     anim_on: bool,
     anim_timer: bool,
@@ -2103,6 +2109,9 @@ impl Launcher {
         unsafe {
             let _ = ShowWindow(hwnd, SW_SHOW);
             explorer_win::activate::force_foreground(hwnd);
+            if let Some(c) = &self.clicks {
+                c.arm(true);
+            }
             let _ = SetFocus(Some(self.edit));
             if GetForegroundWindow() != hwnd {
                 // Keystrokes would go to the previous window: try again
@@ -2227,6 +2236,9 @@ impl Launcher {
             return;
         }
         self.stop_anims(hwnd);
+        if let Some(c) = &self.clicks {
+            c.arm(false);
+        }
         // SAFETY: hiding our own window.
         let _ = unsafe { ShowWindow(hwnd, SW_HIDE) };
         self.reset(hwnd);
@@ -3116,6 +3128,10 @@ impl Handler for Launcher {
                 let scale = explorer_win::dpi::scale(explorer_win::dpi::window_dpi(hwnd));
                 self.apply_dpi(hwnd, scale);
                 self.workers = Some(Workers::start(hwnd, WM_APP_WORKER));
+                match explorer_win::keyboard::ClickWatcher::start(hwnd, WM_APP_CLICK) {
+                    Ok(c) => self.clicks = Some(c),
+                    Err(e) => tracing::warn!(error = %e, "cannot start the click watcher"),
+                }
                 self.send_job(Job::Tools);
                 self.send_job(Job::Avatar);
                 self.send_job(Job::Recent { max: REC_MAX });
@@ -3207,6 +3223,17 @@ impl Handler for Launcher {
                     SetBkColor(hdc, COLORREF(bgr(self.palette.input_bg)));
                 }
                 self.edit_brush.map(|b| LRESULT(b.0 as isize))
+            }
+            WM_APP_CLICK => {
+                // A click on another process's window (desktop, taskbar,
+                // an app): close like a lost activation would. The Start
+                // button's own toggle that follows is debounced.
+                let pt = explorer_win::keyboard::click_point(lparam);
+                if is_visible(hwnd) && explorer_win::keyboard::click_is_foreign(pt) {
+                    self.hide(hwnd);
+                    self.hidden_at = Some(Instant::now());
+                }
+                Some(LRESULT(0))
             }
             WM_ACTIVATE => {
                 // Hide when the user clicks elsewhere (including the Start
