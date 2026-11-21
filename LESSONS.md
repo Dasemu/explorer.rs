@@ -226,3 +226,12 @@ Non-obvious findings. Add an entry whenever something surprises you.
   its monitor, on activation and on a short timer), and put the bar right
   below that window: HWND_NOTOPMOST alone still covers the game until it is
   activated again.
+- **Full screen is per monitor.** Deciding it from the foreground window
+  put the taskbar back over a full-screen video as soon as the user clicked
+  an app on another monitor. Walk the Z order per monitor instead: the first
+  ordinary window on a monitor decides (overlays and desktops do not).
+- **Hiding Explorer's taskbar needs a reaction, not only a timer.**
+  Explorer shows it again on the Win key, the auto-hide reveal and
+  notifications; a 2 s timer left it covering the Start menu. Re-hide on
+  EVENT_OBJECT_SHOW, and stop hiding once the state file is gone (someone
+  restored it on purpose).

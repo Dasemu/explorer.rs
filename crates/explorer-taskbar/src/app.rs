@@ -182,6 +182,9 @@ pub(crate) struct Shared {
     pub sys_status: RefCell<SysStatus>,
     pub flyout: RefCell<Option<flyout::State>>,
     pub flyout_hwnd: Cell<HWND>,
+    /// Full-screen windows per monitor, (monitor, window) as integers; read
+    /// by each bar on WM_APP_FULLSCREEN.
+    pub fullscreen: RefCell<Vec<(isize, isize)>>,
     /// Closes a sticky flyout on a click on a window that never activates.
     pub flyout_clicks: RefCell<Option<explorer_win::keyboard::ClickWatcher>>,
     pub flyout_closed: RefCell<Option<(flyout::Opener, Instant)>>,
@@ -682,6 +685,7 @@ pub fn run(args: Args) -> i32 {
         sys_status: RefCell::new(SysStatus::default()),
         flyout: RefCell::new(None),
         flyout_hwnd: Cell::new(HWND::default()),
+        fullscreen: RefCell::new(Vec::new()),
         flyout_clicks: RefCell::new(None),
         flyout_closed: RefCell::new(None),
         show_desktop: RefCell::new(ShowDesktop::default()),
@@ -713,7 +717,6 @@ pub fn run(args: Args) -> i32 {
             ticks: 0,
             win_taskbar_state: (mode == RunMode::Dev && shared.config.taskbar.hide_windows_taskbar)
                 .then(|| paths.windows_taskbar_state_file()),
-            fullscreen: None,
         }),
     ) {
         Ok(h) => h,
@@ -753,34 +756,25 @@ struct Controller {
     ticks: u64,
     /// Set while Windows' taskbar is to be hidden (dev mode + config).
     win_taskbar_state: Option<std::path::PathBuf>,
-    /// Last full-screen foreground window and its monitor (as integers).
-    fullscreen: Option<(isize, isize)>,
 }
 
 impl Controller {
-    /// Tell the bars when a full-screen app takes or leaves the foreground.
-    /// Explorer's AppBar manager does that with ABN_FULLSCREENAPP, but it is
-    /// not there when explorer.rs is the shell.
+    /// Tell the bars when a monitor starts or stops showing a full-screen
+    /// app. Explorer's AppBar manager does that with ABN_FULLSCREENAPP, but
+    /// it is not there when explorer.rs is the shell.
     fn check_fullscreen(&mut self, force: bool) {
-        let now = explorer_win::winlist::fullscreen_foreground()
-            .map(|(w, m)| (w.0 as isize, m.0 as isize));
-        if now == self.fullscreen && !force {
+        let now = explorer_win::winlist::fullscreen_windows();
+        if now == *self.shared.fullscreen.borrow() && !force {
             return;
         }
-        if now != self.fullscreen {
-            tracing::info!(window = ?now.map(|n| n.0), "full-screen app {}", if now.is_some() { "in front" } else { "gone" });
+        if now != *self.shared.fullscreen.borrow() {
+            tracing::info!(monitors = now.len(), windows = ?now.iter().map(|p| p.1).collect::<Vec<_>>(), "full-screen apps changed");
         }
-        self.fullscreen = now;
-        let (win, mon) = now.unwrap_or((0, 0));
+        *self.shared.fullscreen.borrow_mut() = now;
         for &b in self.shared.bars.borrow().iter() {
             // SAFETY: posting to our own window.
             let _ = unsafe {
-                PostMessageW(
-                    Some(b),
-                    crate::bar::WM_APP_FULLSCREEN,
-                    WPARAM(win as usize),
-                    LPARAM(mon),
-                )
+                PostMessageW(Some(b), crate::bar::WM_APP_FULLSCREEN, WPARAM(0), LPARAM(0))
             };
         }
     }
@@ -884,9 +878,7 @@ impl Controller {
                 self.upsert(hwnd);
                 self.apply(WindowEvent::Activated(hwnd_to_u64(hwnd)));
                 self.check_fullscreen(false);
-                if self.win_taskbar_state.is_some() {
-                    explorer_win::win_taskbar::reassert_hidden();
-                }
+                self.rehide_win_taskbar();
                 if self.shared.mode == RunMode::Dev {
                     for &b in self.shared.bars.borrow().iter() {
                         // SAFETY: posting to our own window.
@@ -896,7 +888,35 @@ impl Controller {
                     }
                 }
             }
+            ev::EVENT_OBJECT_SHOW
+                if self.win_taskbar_state.is_some()
+                    && explorer_win::win_taskbar::is_explorer_taskbar(hwnd) =>
+            {
+                // Explorer showed its taskbar again (Win key, the auto-hide
+                // reveal at the screen edge, notifications): hide it now
+                // rather than at the next timer tick.
+                self.rehide_win_taskbar();
+            }
             _ => self.upsert(hwnd),
+        }
+    }
+
+    /// Hide Windows' taskbar again if Explorer showed it, while we are the
+    /// ones hiding it. Once someone else restored it (Ctrl+Alt+Shift+E,
+    /// --restore-explorer: the state file is gone), stop for good instead
+    /// of hiding it right back.
+    fn rehide_win_taskbar(&mut self) {
+        let Some(f) = &self.win_taskbar_state else {
+            return;
+        };
+        if f.exists() {
+            explorer_win::win_taskbar::reassert_hidden();
+        } else {
+            tracing::warn!("Windows' taskbar was restored by someone else; no longer hiding it");
+            self.win_taskbar_state = None;
+            // SAFETY: our own timer.
+            let _ =
+                unsafe { KillTimer(Some(self.shared.controller.get()), TIMER_HIDE_WIN_TASKBAR) };
         }
     }
 
@@ -1068,6 +1088,8 @@ impl Handler for Controller {
                 // (otherwise typing can go to the previous window).
                 explorer_win::keyboard::claim_foreground_rights();
                 explorer_win::ipc::send_launcher_command(LauncherCommand::Toggle);
+                // Explorer may reveal its (auto-hidden) taskbar on the key.
+                self.rehide_win_taskbar();
                 Some(LRESULT(0))
             }
             WM_APP_TRAY_CHANGED => {
@@ -1151,7 +1173,7 @@ impl Handler for Controller {
                     }
                     TIMER_RESYNC => self.resync(),
                     TIMER_FULLSCREEN => self.check_fullscreen(false),
-                    TIMER_HIDE_WIN_TASKBAR => explorer_win::win_taskbar::reassert_hidden(),
+                    TIMER_HIDE_WIN_TASKBAR => self.rehide_win_taskbar(),
                     TIMER_REBUILD => {
                         // SAFETY: our own timer.
                         let _ = unsafe { KillTimer(Some(hwnd), TIMER_REBUILD) };

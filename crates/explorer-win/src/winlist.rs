@@ -162,36 +162,64 @@ pub fn dump(rules: &explorer_core::window_filter::FilterRules) -> String {
     s
 }
 
-/// The foreground window and its monitor, if it is a full-screen app (see
-/// [`explorer_core::fullscreen`]). Windows of this process never count.
-pub fn fullscreen_foreground() -> Option<(HWND, windows::Win32::Graphics::Gdi::HMONITOR)> {
-    use explorer_core::fullscreen::{is_fullscreen, ScreenRect};
+/// Full-screen windows per monitor, as (monitor, window) handles as
+/// integers (see [`explorer_core::fullscreen::fullscreen_per_monitor`]).
+/// Windows of this process never count.
+pub fn fullscreen_windows() -> Vec<(isize, isize)> {
+    use explorer_core::fullscreen::{fullscreen_per_monitor, Candidate, ScreenRect};
     use windows::Win32::Foundation::RECT;
     use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONULL};
-    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect};
-    // SAFETY: plain queries on a window handle that may vanish meanwhile
-    // (every call then fails harmlessly).
-    unsafe {
-        let fg = GetForegroundWindow();
-        if fg.is_invalid() || IsIconic(fg).as_bool() || cloaked(fg) != 0 {
-            return None;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowRect, IsWindowVisible, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+    };
+    let sr = |r: RECT| ScreenRect {
+        left: r.left,
+        top: r.top,
+        right: r.right,
+        bottom: r.bottom,
+    };
+    let monitors: Vec<(isize, ScreenRect)> = crate::monitors::all()
+        .into_iter()
+        .map(|m| (m.handle.0 as isize, sr(m.rect)))
+        .collect();
+    let me = std::process::id();
+    let mut cands = Vec::new();
+    for h in top_level_windows() {
+        // SAFETY: plain queries on windows that may vanish meanwhile (the
+        // calls then fail harmlessly).
+        unsafe {
+            if !IsWindowVisible(h).as_bool() || IsIconic(h).as_bool() {
+                continue;
+            }
+            let mut r = RECT::default();
+            if GetWindowRect(h, &mut r).is_err() || r.right <= r.left || r.bottom <= r.top {
+                continue;
+            }
+            if crate::process::window_pid(h) == me || cloaked(h) != 0 {
+                continue;
+            }
+            let mon = MonitorFromWindow(h, MONITOR_DEFAULTTONULL);
+            if mon.is_invalid() {
+                continue;
+            }
+            let ex = GetWindowLongW(h, GWL_EXSTYLE) as u32;
+            // Click-through layers (game overlays, screen dimmers) are not
+            // apps at all.
+            if ex & WS_EX_TRANSPARENT.0 != 0 {
+                continue;
+            }
+            let overlay = ex & (WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0) != 0;
+            cands.push(Candidate {
+                id: h.0 as u64,
+                monitor: mon.0 as isize,
+                rect: sr(r),
+                class: class_name(h),
+                overlay,
+            });
         }
-        if crate::process::window_pid(fg) == std::process::id() {
-            return None;
-        }
-        let mut r = RECT::default();
-        GetWindowRect(fg, &mut r).ok()?;
-        let mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONULL);
-        if mon.is_invalid() {
-            return None;
-        }
-        let m = crate::monitors::query(mon)?;
-        let sr = |r: RECT| ScreenRect {
-            left: r.left,
-            top: r.top,
-            right: r.right,
-            bottom: r.bottom,
-        };
-        is_fullscreen(&class_name(fg), sr(r), sr(m.rect)).then_some((fg, mon))
     }
+    fullscreen_per_monitor(&cands, &monitors)
+        .into_iter()
+        .map(|(m, w)| (m, w as isize))
+        .collect()
 }

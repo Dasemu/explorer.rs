@@ -56,8 +56,8 @@ const WM_APP_POSITION: u32 = WM_APP + 3;
 /// mode: put the bar back on top of explorer's own taskbar, which Windows
 /// raises when its Search, Start or Task view opens.
 pub(crate) const WM_APP_RAISE: u32 = WM_APP + 40;
-/// Posted by the controller when a full-screen app takes or leaves the
-/// foreground: wParam = its window (0: none), lParam = its monitor.
+/// Posted by the controller when the full-screen windows changed (see
+/// `Shared::fullscreen`).
 pub(crate) const WM_APP_FULLSCREEN: u32 = WM_APP + 41;
 
 /// WinUser.h value; not exported by the `windows` crate module we use.
@@ -1313,9 +1313,14 @@ impl Handler for Bar {
                 Some(LRESULT(0))
             }
             WM_APP_FULLSCREEN => {
-                let win = HWND(wparam.0 as *mut core::ffi::c_void);
-                let mine = lparam.0 != 0 && lparam.0 == self.monitor.handle.0 as isize;
-                self.fullscreen_window = (mine && !win.is_invalid()).then_some(win);
+                let mon = self.monitor.handle.0 as isize;
+                self.fullscreen_window = self
+                    .shared
+                    .fullscreen
+                    .borrow()
+                    .iter()
+                    .find(|(m, _)| *m == mon)
+                    .map(|(_, w)| HWND(*w as *mut core::ffi::c_void));
                 self.apply_z_order(hwnd);
                 Some(LRESULT(0))
             }
