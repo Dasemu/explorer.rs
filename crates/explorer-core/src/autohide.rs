@@ -43,6 +43,24 @@ pub fn offset(thickness: i32, peek: i32, hidden: f32) -> i32 {
     ((thickness - peek).max(0) as f32 * hidden.clamp(0.0, 1.0)).round() as i32
 }
 
+/// Whether the work area (`work_top`..`work_bottom`) of a monitor no
+/// longer leaves room for a bar spanning `bar_top`..`bar_bottom` along its
+/// edge: something (Explorer recomputing it when its own taskbar settings
+/// change, another program) reset it, and apps now draw under the bar.
+pub fn reservation_lost(
+    work_top: i32,
+    work_bottom: i32,
+    bar_top: i32,
+    bar_bottom: i32,
+    bottom_edge: bool,
+) -> bool {
+    if bottom_edge {
+        work_bottom > bar_top
+    } else {
+        work_top < bar_bottom
+    }
+}
+
 /// Delays hiding until the bar has not been wanted for [`HIDE_DELAY`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Linger {
@@ -111,6 +129,18 @@ mod tests {
         assert_eq!(offset(48, 2, 0.5), 23);
         assert_eq!(offset(48, 2, 3.0), 46);
         assert_eq!(offset(1, 2, 1.0), 0);
+    }
+
+    #[test]
+    fn lost_reservations_are_noticed() {
+        // 1080p monitor, 48 px bar at the bottom.
+        assert!(!reservation_lost(0, 1032, 1032, 1080, true));
+        assert!(reservation_lost(0, 1080, 1032, 1080, true));
+        // Explorer's own (hidden) taskbar still reserved: more room is fine.
+        assert!(!reservation_lost(0, 992, 1032, 1080, true));
+        // Top edge.
+        assert!(!reservation_lost(48, 1080, 0, 48, false));
+        assert!(reservation_lost(0, 1080, 0, 48, false));
     }
 
     #[test]

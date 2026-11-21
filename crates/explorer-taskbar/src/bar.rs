@@ -65,6 +65,9 @@ pub(crate) const WM_APP_AUTOHIDE: u32 = WM_APP + 42;
 /// Posted by the controller when the Start menu opens with the Win key:
 /// an auto-hidden bar on the pointer's monitor comes up with it.
 pub(crate) const WM_APP_REVEAL: u32 = WM_APP + 43;
+/// Posted by the controller every few seconds and on setting changes:
+/// check that the work area still leaves the bar's space free.
+pub(crate) const WM_APP_CHECK_RESERVE: u32 = WM_APP + 44;
 
 /// WinUser.h value; not exported by the `windows` crate module we use.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -202,6 +205,9 @@ pub(crate) struct Bar {
     linger: Linger,
     /// Where the bar sits when shown.
     base_rect: RECT,
+    /// Consecutive checks that found the reservation lost (back-off).
+    reserve_lost: u32,
+    reserve_checks: u32,
 }
 
 /// Key under which a hit's hover highlight animates.
@@ -500,6 +506,45 @@ impl Bar {
         self.position(hwnd);
     }
 
+    /// Re-reserve the bar's space if the work area lost it. After a few
+    /// attempts that did not stick, only try every ~30 s: each attempt
+    /// broadcasts a setting change to every window.
+    fn check_reservation(&mut self, hwnd: HWND) {
+        if self.auto_hide {
+            self.reserve_lost = 0;
+            return;
+        }
+        self.reserve_checks = self.reserve_checks.wrapping_add(1);
+        let Some(m) = monitors::query(self.monitor.handle) else {
+            return;
+        };
+        let r = self.base_rect;
+        let bottom = self.shared.config.taskbar.position == Edge::Bottom;
+        if !autohide::reservation_lost(m.work.top, m.work.bottom, r.top, r.bottom, bottom) {
+            if self.reserve_lost > 0 {
+                tracing::info!(monitor = %m.describe(), "taskbar space reserved again");
+            }
+            self.reserve_lost = 0;
+            return;
+        }
+        if self.reserve_lost >= 3 && self.reserve_checks % 15 != 0 {
+            return;
+        }
+        if self.reserve_lost == 0 {
+            tracing::warn!(
+                monitor = %m.describe(),
+                work = ?(m.work.top, m.work.bottom),
+                bar = ?(r.top, r.bottom),
+                "the work area no longer leaves room for the taskbar; reserving it again"
+            );
+        }
+        self.reserve_lost += 1;
+        if let Some(ab) = self.appbar.as_mut() {
+            ab.reregister();
+        }
+        self.position(hwnd);
+    }
+
     pub fn create(shared: Rc<Shared>, m: Monitor) -> Result<HWND> {
         let rect = explorer_win::appbar::bar_rect(
             m.rect,
@@ -536,6 +581,8 @@ impl Bar {
                 slide: None,
                 linger: Linger::default(),
                 base_rect: rect,
+                reserve_lost: 0,
+                reserve_checks: 0,
             }),
         )
     }
@@ -1599,6 +1646,10 @@ impl Handler for Bar {
                         self.slide_to(hwnd, 0.0);
                     }
                 }
+                Some(LRESULT(0))
+            }
+            WM_APP_CHECK_RESERVE => {
+                self.check_reservation(hwnd);
                 Some(LRESULT(0))
             }
             WM_TIMER if wparam.0 == TIMER_AUTOHIDE => {

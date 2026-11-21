@@ -779,6 +779,13 @@ fn auto_hide_wanted(setting: AutoHide, state_file: &std::path::Path) -> bool {
 }
 
 impl Controller {
+    fn post_bars(&self, msg: u32) {
+        for &b in self.shared.bars.borrow().iter() {
+            // SAFETY: posting to our own window.
+            let _ = unsafe { PostMessageW(Some(b), msg, WPARAM(0), LPARAM(0)) };
+        }
+    }
+
     /// Follow Windows' "Automatically hide the taskbar" setting.
     fn check_auto_hide(&mut self) {
         let on = auto_hide_wanted(
@@ -1174,7 +1181,11 @@ impl Handler for Controller {
                 // ("TraySettings") changed. Cheap reads; the bars only move
                 // when auto-hide really changed, so our own SPI_SETWORKAREA
                 // notifications cannot loop.
+                if let Some(f) = &self.win_taskbar_state {
+                    explorer_win::win_taskbar::follow_user_change(f);
+                }
                 self.check_auto_hide();
+                self.post_bars(crate::bar::WM_APP_CHECK_RESERVE);
                 if self.shared.reload_appearance() {
                     tracing::info!("appearance changed");
                     self.shared.invalidate_bars();
@@ -1198,6 +1209,12 @@ impl Handler for Controller {
                         };
                         if self.ticks % 30 == 0 {
                             self.shared.tray_exe.borrow_mut().clear();
+                        }
+                        if self.ticks % 2 == 0 {
+                            if let Some(f) = &self.win_taskbar_state {
+                                explorer_win::win_taskbar::follow_user_change(f);
+                            }
+                            self.post_bars(crate::bar::WM_APP_CHECK_RESERVE);
                         }
                         let settings = self.ticks % 5 == 0 && self.shared.reload_tray_settings();
                         if pruned || settings {

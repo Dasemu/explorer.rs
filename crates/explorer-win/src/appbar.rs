@@ -27,6 +27,7 @@ pub struct AppBar {
     hwnd: HWND,
     mode: RunMode,
     registered: bool,
+    callback_msg: u32,
     /// Shell mode: monitor rect whose work area we changed.
     work_area_monitor: Option<RECT>,
 }
@@ -74,7 +75,28 @@ impl AppBar {
             hwnd,
             mode,
             registered,
+            callback_msg,
             work_area_monitor: None,
+        }
+    }
+
+    /// Dev mode: register with Explorer's AppBar manager again (it may
+    /// have dropped or forgotten our reservation). Follow with `reserve`.
+    pub fn reregister(&mut self) {
+        if self.mode != RunMode::Dev {
+            return;
+        }
+        let mut d = data(self.hwnd);
+        d.uCallbackMessage = self.callback_msg;
+        // SAFETY: valid APPBARDATA for both calls.
+        unsafe {
+            if self.registered {
+                SHAppBarMessage(ABM_REMOVE, &mut d);
+            }
+            self.registered = SHAppBarMessage(ABM_NEW, &mut d) != 0;
+        }
+        if !self.registered {
+            tracing::warn!("ABM_NEW failed while re-registering the taskbar");
         }
     }
 

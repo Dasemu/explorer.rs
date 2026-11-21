@@ -241,3 +241,9 @@ Non-obvious findings. Add an entry whenever something surprises you.
   windows without a title bar count as full screen when maximized. The
   Start menu must keep the bar's thickness free on its own, since the work
   area no longer does.
+- **The reserved screen space is not ours to keep.** Explorer recomputes
+  the work area when its own taskbar settings change (turning auto-hide off
+  on Windows 10 put apps under our bar), and other programs can reset it.
+  Reserving once at start-up is not enough: check every few seconds that
+  the work area still leaves the bar's space free, and reserve again (with
+  a back-off, each attempt broadcasts to every window).
