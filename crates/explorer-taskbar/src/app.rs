@@ -29,7 +29,7 @@ use std::time::{Duration, Instant, SystemTime};
 use explorer_core::calendar;
 use explorer_core::catalog::{Catalog, LaunchTarget};
 use explorer_core::clock::{self, DateTime};
-use explorer_core::config::{Alignment, Config, MonitorSelection};
+use explorer_core::config::{Alignment, AutoHide, Config, MonitorSelection};
 use explorer_core::i18n::Lang;
 use explorer_core::image::SharedImage;
 use explorer_core::ipc::{LauncherCommand, RunMode, TASKBAR_WINDOW_CLASS};
@@ -182,9 +182,15 @@ pub(crate) struct Shared {
     pub sys_status: RefCell<SysStatus>,
     pub flyout: RefCell<Option<flyout::State>>,
     pub flyout_hwnd: Cell<HWND>,
+    /// Full-screen windows per monitor, (monitor, window) as integers; read
+    /// by each bar on WM_APP_FULLSCREEN.
+    pub fullscreen: RefCell<Vec<(isize, isize)>>,
     /// Closes a sticky flyout on a click on a window that never activates.
     pub flyout_clicks: RefCell<Option<explorer_win::keyboard::ClickWatcher>>,
     pub flyout_closed: RefCell<Option<(flyout::Opener, Instant)>>,
+    /// The bars auto-hide (config, or Windows' setting); see
+    /// `Controller::check_auto_hide`.
+    pub auto_hide: Cell<bool>,
     show_desktop: RefCell<ShowDesktop>,
     show_desktop_at: Cell<Option<Instant>>,
     pub controller: Cell<HWND>,
@@ -682,8 +688,13 @@ pub fn run(args: Args) -> i32 {
         sys_status: RefCell::new(SysStatus::default()),
         flyout: RefCell::new(None),
         flyout_hwnd: Cell::new(HWND::default()),
+        fullscreen: RefCell::new(Vec::new()),
         flyout_clicks: RefCell::new(None),
         flyout_closed: RefCell::new(None),
+        auto_hide: Cell::new(auto_hide_wanted(
+            config.taskbar.auto_hide,
+            &paths.windows_taskbar_state_file(),
+        )),
         show_desktop: RefCell::new(ShowDesktop::default()),
         show_desktop_at: Cell::new(None),
         controller: Cell::new(HWND::default()),
@@ -713,7 +724,7 @@ pub fn run(args: Args) -> i32 {
             ticks: 0,
             win_taskbar_state: (mode == RunMode::Dev && shared.config.taskbar.hide_windows_taskbar)
                 .then(|| paths.windows_taskbar_state_file()),
-            fullscreen: None,
+            taskbar_state_file: paths.windows_taskbar_state_file(),
         }),
     ) {
         Ok(h) => h,
@@ -753,34 +764,62 @@ struct Controller {
     ticks: u64,
     /// Set while Windows' taskbar is to be hidden (dev mode + config).
     win_taskbar_state: Option<std::path::PathBuf>,
-    /// Last full-screen foreground window and its monitor (as integers).
-    fullscreen: Option<(isize, isize)>,
+    /// Where the user's own Windows taskbar auto-hide choice is kept while
+    /// we hide that taskbar (read for `auto_hide = "system"`).
+    taskbar_state_file: std::path::PathBuf,
+}
+
+/// Whether the bars should auto-hide.
+fn auto_hide_wanted(setting: AutoHide, state_file: &std::path::Path) -> bool {
+    match setting {
+        AutoHide::Always => true,
+        AutoHide::Never => false,
+        AutoHide::System => explorer_win::win_taskbar::system_autohide(state_file),
+    }
 }
 
 impl Controller {
-    /// Tell the bars when a full-screen app takes or leaves the foreground.
-    /// Explorer's AppBar manager does that with ABN_FULLSCREENAPP, but it is
-    /// not there when explorer.rs is the shell.
-    fn check_fullscreen(&mut self, force: bool) {
-        let now = explorer_win::winlist::fullscreen_foreground()
-            .map(|(w, m)| (w.0 as isize, m.0 as isize));
-        if now == self.fullscreen && !force {
+    fn post_bars(&self, msg: u32) {
+        for &b in self.shared.bars.borrow().iter() {
+            // SAFETY: posting to our own window.
+            let _ = unsafe { PostMessageW(Some(b), msg, WPARAM(0), LPARAM(0)) };
+        }
+    }
+
+    /// Follow Windows' "Automatically hide the taskbar" setting.
+    fn check_auto_hide(&mut self) {
+        let on = auto_hide_wanted(
+            self.shared.config.taskbar.auto_hide,
+            &self.taskbar_state_file,
+        );
+        if on == self.shared.auto_hide.get() {
             return;
         }
-        if now != self.fullscreen {
-            tracing::info!(window = ?now.map(|n| n.0), "full-screen app {}", if now.is_some() { "in front" } else { "gone" });
+        tracing::info!(auto_hide = on, "taskbar auto-hide changed");
+        self.shared.auto_hide.set(on);
+        for &b in self.shared.bars.borrow().iter() {
+            // SAFETY: posting to our own window.
+            let _ =
+                unsafe { PostMessageW(Some(b), crate::bar::WM_APP_AUTOHIDE, WPARAM(0), LPARAM(0)) };
         }
-        self.fullscreen = now;
-        let (win, mon) = now.unwrap_or((0, 0));
+    }
+
+    /// Tell the bars when a monitor starts or stops showing a full-screen
+    /// app. Explorer's AppBar manager does that with ABN_FULLSCREENAPP, but
+    /// it is not there when explorer.rs is the shell.
+    fn check_fullscreen(&mut self, force: bool) {
+        let now = explorer_win::winlist::fullscreen_windows();
+        if now == *self.shared.fullscreen.borrow() && !force {
+            return;
+        }
+        if now != *self.shared.fullscreen.borrow() {
+            tracing::info!(monitors = now.len(), windows = ?now.iter().map(|p| p.1).collect::<Vec<_>>(), "full-screen apps changed");
+        }
+        *self.shared.fullscreen.borrow_mut() = now;
         for &b in self.shared.bars.borrow().iter() {
             // SAFETY: posting to our own window.
             let _ = unsafe {
-                PostMessageW(
-                    Some(b),
-                    crate::bar::WM_APP_FULLSCREEN,
-                    WPARAM(win as usize),
-                    LPARAM(mon),
-                )
+                PostMessageW(Some(b), crate::bar::WM_APP_FULLSCREEN, WPARAM(0), LPARAM(0))
             };
         }
     }
@@ -884,9 +923,7 @@ impl Controller {
                 self.upsert(hwnd);
                 self.apply(WindowEvent::Activated(hwnd_to_u64(hwnd)));
                 self.check_fullscreen(false);
-                if self.win_taskbar_state.is_some() {
-                    explorer_win::win_taskbar::reassert_hidden();
-                }
+                self.rehide_win_taskbar();
                 if self.shared.mode == RunMode::Dev {
                     for &b in self.shared.bars.borrow().iter() {
                         // SAFETY: posting to our own window.
@@ -896,7 +933,35 @@ impl Controller {
                     }
                 }
             }
+            ev::EVENT_OBJECT_SHOW
+                if self.win_taskbar_state.is_some()
+                    && explorer_win::win_taskbar::is_explorer_taskbar(hwnd) =>
+            {
+                // Explorer showed its taskbar again (Win key, the auto-hide
+                // reveal at the screen edge, notifications): hide it now
+                // rather than at the next timer tick.
+                self.rehide_win_taskbar();
+            }
             _ => self.upsert(hwnd),
+        }
+    }
+
+    /// Hide Windows' taskbar again if Explorer showed it, while we are the
+    /// ones hiding it. Once someone else restored it (Ctrl+Alt+Shift+E,
+    /// --restore-explorer: the state file is gone), stop for good instead
+    /// of hiding it right back.
+    fn rehide_win_taskbar(&mut self) {
+        let Some(f) = &self.win_taskbar_state else {
+            return;
+        };
+        if f.exists() {
+            explorer_win::win_taskbar::reassert_hidden();
+        } else {
+            tracing::warn!("Windows' taskbar was restored by someone else; no longer hiding it");
+            self.win_taskbar_state = None;
+            // SAFETY: our own timer.
+            let _ =
+                unsafe { KillTimer(Some(self.shared.controller.get()), TIMER_HIDE_WIN_TASKBAR) };
         }
     }
 
@@ -1068,6 +1133,15 @@ impl Handler for Controller {
                 // (otherwise typing can go to the previous window).
                 explorer_win::keyboard::claim_foreground_rights();
                 explorer_win::ipc::send_launcher_command(LauncherCommand::Toggle);
+                // An auto-hidden bar comes up with the Start menu.
+                for &b in self.shared.bars.borrow().iter() {
+                    // SAFETY: posting to our own window.
+                    let _ = unsafe {
+                        PostMessageW(Some(b), crate::bar::WM_APP_REVEAL, WPARAM(0), LPARAM(0))
+                    };
+                }
+                // Explorer may reveal its (auto-hidden) taskbar on the key.
+                self.rehide_win_taskbar();
                 Some(LRESULT(0))
             }
             WM_APP_TRAY_CHANGED => {
@@ -1103,9 +1177,15 @@ impl Handler for Controller {
                 Some(LRESULT(1))
             }
             WM_SETTINGCHANGE => {
-                // Theme ("ImmersiveColorSet") or taskbar alignment changed.
-                // Cheap registry reads; no repositioning, so our own
-                // SPI_SETWORKAREA notifications cannot loop.
+                // Theme ("ImmersiveColorSet"), taskbar alignment or auto-hide
+                // ("TraySettings") changed. Cheap reads; the bars only move
+                // when auto-hide really changed, so our own SPI_SETWORKAREA
+                // notifications cannot loop.
+                if let Some(f) = &self.win_taskbar_state {
+                    explorer_win::win_taskbar::follow_user_change(f);
+                }
+                self.check_auto_hide();
+                self.post_bars(crate::bar::WM_APP_CHECK_RESERVE);
                 if self.shared.reload_appearance() {
                     tracing::info!("appearance changed");
                     self.shared.invalidate_bars();
@@ -1130,6 +1210,12 @@ impl Handler for Controller {
                         if self.ticks % 30 == 0 {
                             self.shared.tray_exe.borrow_mut().clear();
                         }
+                        if self.ticks % 2 == 0 {
+                            if let Some(f) = &self.win_taskbar_state {
+                                explorer_win::win_taskbar::follow_user_change(f);
+                            }
+                            self.post_bars(crate::bar::WM_APP_CHECK_RESERVE);
+                        }
                         let settings = self.ticks % 5 == 0 && self.shared.reload_tray_settings();
                         if pruned || settings {
                             self.shared.invalidate_bars();
@@ -1151,7 +1237,7 @@ impl Handler for Controller {
                     }
                     TIMER_RESYNC => self.resync(),
                     TIMER_FULLSCREEN => self.check_fullscreen(false),
-                    TIMER_HIDE_WIN_TASKBAR => explorer_win::win_taskbar::reassert_hidden(),
+                    TIMER_HIDE_WIN_TASKBAR => self.rehide_win_taskbar(),
                     TIMER_REBUILD => {
                         // SAFETY: our own timer.
                         let _ = unsafe { KillTimer(Some(hwnd), TIMER_REBUILD) };

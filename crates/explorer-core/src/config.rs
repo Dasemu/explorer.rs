@@ -90,6 +90,16 @@ pub enum Alignment {
     Left,
 }
 
+/// Taskbar auto-hide: follow Windows' "Automatically hide the taskbar"
+/// setting, or force it on or off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AutoHide {
+    System,
+    Always,
+    Never,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Edge {
@@ -133,6 +143,8 @@ pub struct TaskbarConfig {
     /// Alongside Windows Explorer: hide Windows' own taskbar while ours
     /// runs (restored when explorer.rs stops). No effect in shell mode.
     pub hide_windows_taskbar: bool,
+    /// Slide the taskbar out of sight until the pointer touches its edge.
+    pub auto_hide: AutoHide,
 }
 
 impl Default for TaskbarConfig {
@@ -152,6 +164,7 @@ impl Default for TaskbarConfig {
             exclude_processes: Vec::new(),
             combine: Combine::Always,
             hide_windows_taskbar: true,
+            auto_hide: AutoHide::System,
         }
     }
 }

@@ -152,3 +152,53 @@ pub fn restore(state_file: &Path) {
     let _ = std::fs::remove_file(state_file);
     tracing::info!(autohide = was, "Windows' taskbar restored");
 }
+
+/// Where Explorer keeps the taskbar's settings; byte 8, bit 0 of the
+/// "Settings" value is "Automatically hide the taskbar".
+const STUCK_RECTS: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3";
+
+/// Windows' "Automatically hide the taskbar" setting, as the user chose it.
+///
+/// While we hide Windows' taskbar we switched it to auto-hide ourselves,
+/// so the user's own choice is the one saved in `state_file`. Otherwise
+/// Explorer's taskbar answers, and without Explorer (shell mode) the
+/// setting it would load at sign-in.
+pub fn system_autohide(state_file: &Path) -> bool {
+    if let Some(was) = read_saved(state_file) {
+        return was;
+    }
+    if let Some(&primary) = windows_of(PRIMARY).first() {
+        return state(primary) & ABS_AUTOHIDE != 0;
+    }
+    crate::registry::read_binary(crate::registry::Root::CurrentUser, STUCK_RECTS, "Settings")
+        .and_then(|b| b.get(8).copied())
+        .is_some_and(|b| b & 0x01 != 0)
+}
+
+/// While we hide Windows' taskbar we keep it on auto-hide, and the user's
+/// own choice in the state file. Turning auto-hide off in Windows' settings
+/// then reaches Explorer's taskbar, which takes its screen space back (and
+/// a hidden window still reserves it). Record that choice and put it back
+/// on auto-hide. Returns true when the choice changed.
+pub fn follow_user_change(state_file: &Path) -> bool {
+    let Some(was) = read_saved(state_file) else {
+        return false;
+    };
+    let Some(&primary) = windows_of(PRIMARY).first() else {
+        return false;
+    };
+    let current = state(primary);
+    if current & ABS_AUTOHIDE != 0 {
+        return false;
+    }
+    if let Err(e) = std::fs::write(state_file, "autohide_was = false\n") {
+        tracing::warn!(error = %e, "cannot update Windows' taskbar state");
+    }
+    tracing::info!(
+        autohide_was = was,
+        "Windows' auto-hide turned off in Settings; recorded"
+    );
+    set_state(primary, (current & ABS_ALWAYSONTOP) | ABS_AUTOHIDE);
+    reassert_hidden();
+    was
+}

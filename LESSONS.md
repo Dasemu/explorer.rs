@@ -226,3 +226,24 @@ Non-obvious findings. Add an entry whenever something surprises you.
   its monitor, on activation and on a short timer), and put the bar right
   below that window: HWND_NOTOPMOST alone still covers the game until it is
   activated again.
+- **Full screen is per monitor.** Deciding it from the foreground window
+  put the taskbar back over a full-screen video as soon as the user clicked
+  an app on another monitor. Walk the Z order per monitor instead: the first
+  ordinary window on a monitor decides (overlays and desktops do not).
+- **Hiding Explorer's taskbar needs a reaction, not only a timer.**
+  Explorer shows it again on the Win key, the auto-hide reveal and
+  notifications; a 2 s timer left it covering the Start menu. Re-hide on
+  EVENT_OBJECT_SHOW, and stop hiding once the state file is gone (someone
+  restored it on purpose).
+- **An auto-hiding taskbar changes the full-screen test.** Once the work
+  area is the whole monitor, every maximized window "covers" it (its frame
+  even overshoots), and the bar would duck under ordinary windows. Only
+  windows without a title bar count as full screen when maximized. The
+  Start menu must keep the bar's thickness free on its own, since the work
+  area no longer does.
+- **The reserved screen space is not ours to keep.** Explorer recomputes
+  the work area when its own taskbar settings change (turning auto-hide off
+  on Windows 10 put apps under our bar), and other programs can reset it.
+  Reserving once at start-up is not enough: check every few seconds that
+  the work area still leaves the bar's space free, and reserve again (with
+  a back-off, each attempt broadcasts to every window).

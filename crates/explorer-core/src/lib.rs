@@ -6,6 +6,7 @@
 //! OS and hands it to the pure functions defined here.
 
 pub mod anim;
+pub mod autohide;
 pub mod calc;
 pub mod calendar;
 pub mod catalog;

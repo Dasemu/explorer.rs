@@ -27,6 +27,7 @@ pub struct AppBar {
     hwnd: HWND,
     mode: RunMode,
     registered: bool,
+    callback_msg: u32,
     /// Shell mode: monitor rect whose work area we changed.
     work_area_monitor: Option<RECT>,
 }
@@ -74,12 +75,47 @@ impl AppBar {
             hwnd,
             mode,
             registered,
+            callback_msg,
             work_area_monitor: None,
         }
     }
 
+    /// Dev mode: register with Explorer's AppBar manager again (it may
+    /// have dropped or forgotten our reservation). Follow with `reserve`.
+    pub fn reregister(&mut self) {
+        if self.mode != RunMode::Dev {
+            return;
+        }
+        let mut d = data(self.hwnd);
+        d.uCallbackMessage = self.callback_msg;
+        // SAFETY: valid APPBARDATA for both calls.
+        unsafe {
+            if self.registered {
+                SHAppBarMessage(ABM_REMOVE, &mut d);
+            }
+            self.registered = SHAppBarMessage(ABM_NEW, &mut d) != 0;
+        }
+        if !self.registered {
+            tracing::warn!("ABM_NEW failed while re-registering the taskbar");
+        }
+    }
+
     /// Reserve space and return the rectangle the window must occupy.
-    pub fn reserve(&mut self, monitor: RECT, edge: Edge, thickness: i32) -> RECT {
+    /// An auto-hiding bar reserves nothing (maximized windows take the
+    /// whole monitor) but keeps its AppBar registration, for the shell's
+    /// full-screen notifications.
+    pub fn reserve(&mut self, monitor: RECT, edge: Edge, thickness: i32, auto_hide: bool) -> RECT {
+        if self.registered && auto_hide {
+            let mut d = data(self.hwnd);
+            d.uEdge = match edge {
+                Edge::Bottom => ABE_BOTTOM,
+                Edge::Top => ABE_TOP,
+            };
+            d.rc = bar_rect(monitor, edge, 0);
+            // SAFETY: valid APPBARDATA.
+            unsafe { SHAppBarMessage(ABM_SETPOS, &mut d) };
+            return bar_rect(monitor, edge, thickness);
+        }
         if self.registered {
             let mut d = data(self.hwnd);
             d.uEdge = match edge {
@@ -106,6 +142,9 @@ impl AppBar {
             match edge {
                 Edge::Bottom => work.bottom = rect.top,
                 Edge::Top => work.top = rect.bottom,
+            }
+            if auto_hide {
+                work = monitor;
             }
             set_work_area(&work);
             self.work_area_monitor = Some(monitor);
