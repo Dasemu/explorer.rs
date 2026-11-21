@@ -75,7 +75,7 @@ pipe ([IPC-PROTOCOL.md](IPC-PROTOCOL.md)).
 |---|---|---|---|
 | `explorer-core` | lib | config, paths, logging, app catalog + launch history, fuzzy search (`nucleo-matcher`), window-filter rules, taskbar model/groups/layout, tray promotion, calendar, system glyphs, Win-key state machine, supervisor policy, `crashlog`, `guardian`, `components`, `startup`, `wallpaper`, `setup`, Start menu logic (`settings_pages`, `calc`, `run_command`, `recent`, `results`) | yes, fully |
 | `explorer-win` | lib | thin Win32/COM wrappers (theme, icons, tray, quick settings back-ends, `session`, `process`, `registry`, `startup`, `wallpaper`, `desktop`, `dialog`); empty on non-Windows | compiles only |
-| `explorer-supervisor` | bin `explorer-rs` | guardian and supervisor (`--supervise`), `--status`, `--edit-config`, `--restore-explorer`, `--restart` | yes (CLI + policy) |
+| `explorer-supervisor` | bin `explorer-rs` | guardian and supervisor (`--supervise`), settings window (`--settings`), `--status`, `--edit-config`, `--restore-explorer`, `--restart` | yes (CLI + policy) |
 | `explorer-taskbar` | bin `explorer-rs-taskbar` | taskbar UI | cross-compiled |
 | `explorer-launcher` | bin `explorer-rs-launcher` | Start menu UI | cross-compiled |
 | `explorer-desktop` | bin `explorer-rs-desktop` | wallpaper desktop window (Progman, `SetShellWindow`) | cross-compiled |

@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Portable parts of `explorer-rs.exe`: the guardian restart loop, the
-//! `--status` report and `--edit-config` file creation. Everything here
+//! `--status` report, `--edit-config` file creation and the model of the
+//! `--settings` window (form <-> TOML edits). Everything here
 //! runs on Linux too, so it is covered by tests (including an integration
 //! test that drives the guardian with a fake supervisor).
 
 pub mod guardian;
+pub mod settings;
 pub mod status;
 
 use std::path::Path;

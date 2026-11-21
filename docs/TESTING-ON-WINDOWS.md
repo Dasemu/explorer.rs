@@ -32,7 +32,7 @@ Installer details: [PACKAGING.md](PACKAGING.md), [INSTALL.md](INSTALL.md). Start
 2. **Install, alongside.** Welcome -> Next. Options: "Run alongside" selected, "Fast file search" and "Start now" ticked, folder `C:\Program Files\explorer-rs`. Install. The progress list finishes without errors and explorer.rs starts next to Windows Explorer.
 3. **Not elevated.** Task Manager -> Details -> add column "Elevated": every `explorer-rs*.exe` is No, except `explorer-rs-index-helper.exe` = Yes.
 4. **Installed items.** Start menu folder "explorer.rs" with 4 shortcuts (incl. "Restore Windows Explorer"); Settings -> Apps -> Installed apps lists explorer.rs by "explorer.rs contributors"; `taskschd.msc` -> explorer-rs -> IndexHelper (highest privileges, at your log on); `reg query HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v explorer-rs` shows a value.
-5. **Settings shortcut.** Click "explorer.rs settings": Notepad opens `%APPDATA%\explorer-rs\config.toml` without a UAC prompt.
+5. **Settings shortcut.** Click "explorer.rs settings": the explorer.rs settings window opens without a UAC prompt (details in step 57a).
 6. **Starts at sign-in.** Sign out and in: explorer.rs starts alongside Explorer.
 7. **Upgrade in place.** Run the installer again: previous choices are pre-selected; running explorer.rs is closed and restarted; no reboot is asked.
 8. **Over-the-shoulder (optional).** As a standard user, run setup and enter another admin's credentials. The Run value is written for the standard user (`reg query HKCU\...` as that user).
@@ -94,6 +94,7 @@ Everything runs next to explorer.exe (dev mode as started by the installer, or `
 55. **Status report.** `explorer-rs.exe --status --output status.txt`: shows version, mode "dev", components, shell registration, config validity and recent events.
 56. **Config hot reload.** Edit config.toml (`[taskbar] height = 40`) and save: within ~4 s only the taskbar restarts with the new height. Save `height = 1`: the log shows an error and nothing restarts. Remove `"launcher"` from `components`: the launcher stops; add it back: it starts.
 57. **Edit config.** With no config file, `explorer-rs.exe --edit-config` creates it from the default and opens it in Notepad.
+57a. **Settings window.** Delete (or rename) `%APPDATA%\explorer-rs\config.toml`. Start -> "..." -> "Configuración de explorer.rs" (or `explorer-rs.exe --settings`): a window opens in your UI language, dark if apps use dark mode, sharp on each monitor (drag it to the other-DPI monitor). The left list has General, Taskbar, Notification area, Start menu, Desktop, File search and Components; each page shows its options with a short explanation, scrolls with the wheel and the scroll bar, and Tab/Shift+Tab reach every control (the page scrolls to the focused one). Running `explorer-rs.exe --settings` again brings the same window to front. Change the taskbar height to 40 and Save: a "Saved" message; `config.toml` now exists, still has the default file's comments and `height = 40`; within ~4 s only the taskbar restarts with the new height. Type 500 as height and Save: an error names the allowed range and focuses the field; the file is unchanged. Add a comment line of your own to config.toml in Notepad ("Edit config file…" button), save it, come back and change "Show the clock": after Save your comment is still there and only `show_clock` changed. Click "Save and restart explorer.rs": taskbar and Start disappear briefly and come back (also in shell mode in phase C: the shell is never left without a taskbar), and the settings window stays open. Close with unsaved changes: it asks whether to save. Switch the language to English, Save, reopen: the window is in English.
 
 ## Phase C: Shell mode (VM only)
 
@@ -210,6 +211,7 @@ Installer / binaries: <file name or git commit>
 55 Status report: PASS / FAIL / notes:
 56 Config hot reload: PASS / FAIL / notes:
 57 Edit config: PASS / FAIL / notes:
+57a Settings window: PASS / FAIL / notes:
 
 ## Phase C: Shell mode (VM only)
 58 Register shell mode: PASS / FAIL / notes:

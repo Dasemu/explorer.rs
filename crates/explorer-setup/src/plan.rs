@@ -36,8 +36,9 @@ pub const PUBLISHER: &str = "explorer.rs contributors";
 /// (`explorer-rs.exe`, implemented by the supervisor).
 pub const RESTORE_EXPLORER_ARGS: &str = "--restore-explorer";
 /// Arguments of the "explorer.rs settings" shortcut (runs unelevated as the
-/// signed-in user: creates config.toml if missing and opens it in Notepad).
-pub const EDIT_CONFIG_ARGS: &str = "--edit-config";
+/// signed-in user): the settings window, which edits config.toml (and can
+/// still open it in Notepad with `--edit-config`).
+pub const SETTINGS_ARGS: &str = "--settings";
 
 /// How explorer.rs starts after sign-in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -392,11 +393,11 @@ pub fn shortcuts(install_dir: &str, lang: Lang) -> Vec<Shortcut> {
         mk(
             tr(lang, "explorer.rs settings", "Configuración de explorer.rs"),
             exe(SUPERVISOR_EXE),
-            EDIT_CONFIG_ARGS,
+            SETTINGS_ARGS,
             tr(
                 lang,
-                "Open your explorer.rs configuration file",
-                "Abrir tu archivo de configuración de explorer.rs",
+                "Change the explorer.rs settings",
+                "Cambiar la configuración de explorer.rs",
             ),
         ),
         mk(
@@ -1063,7 +1064,7 @@ mod tests {
         assert_eq!(s[1].file_name, "Restaurar el Explorador de Windows.lnk");
         assert_eq!(s[1].arguments, "--restore-explorer");
         assert!(s[2].target.ends_with(SUPERVISOR_EXE));
-        assert_eq!(s[2].arguments, "--edit-config");
+        assert_eq!(s[2].arguments, "--settings");
         assert!(s[3].target.ends_with(UNINSTALLER_EXE));
         assert_eq!(s[3].arguments, "--uninstall");
         for sc in &s {
