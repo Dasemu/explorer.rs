@@ -56,6 +56,10 @@ combine = "always"
 # taskbar runs. It comes back (with its previous auto-hide setting) when
 # explorer.rs stops, crashes for good, or with Ctrl+Alt+Shift+E.
 hide_windows_taskbar = true
+# Hide the taskbar until the pointer touches the screen edge (or the Start
+# menu opens): "system" follows Windows' "Automatically hide the taskbar"
+# setting, "always" / "never" override it.
+auto_hide = "system"
 
 [tray]
 # Show the notification area (system tray) on the primary monitor's taskbar.

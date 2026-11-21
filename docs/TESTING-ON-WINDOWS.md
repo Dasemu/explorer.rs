@@ -83,6 +83,7 @@ Everything runs next to explorer.exe (dev mode as started by the installer, or `
 48a. **Search box editing.** Type `14:30`, press Ctrl+A and type `pantalla`: the query is `pantalla`. Ctrl+Backspace deletes the last word. Open Start with the Win key while Notepad is focused and type: the text goes to the search box, never to Notepad.
 48b. **Animations.** Start and every flyout slide in smoothly from the taskbar; switching Home / All apps / search fades; hover highlights fade. With Settings -> Accessibility -> Visual effects -> Animation effects off (or `[general] animations = false`) everything appears instantly.
 48c. **Windows' taskbar stays hidden (alongside mode, Windows 10 and 11).** With Windows' "Automatically hide the taskbar" off and then on: Windows' taskbar never shows, not even for a moment, when you tap the Win key (Start opens fully, nothing covers it), move the mouse to the bottom edge, or get a notification. Ctrl+Alt+Shift+E brings it back and it stays visible; signing out and in hides it again.
+48d. **Auto-hide.** Turn on Windows' "Automatically hide the taskbar" (Settings -> Personalization -> Taskbar -> Taskbar behaviors) with explorer.rs running: within a second our taskbar slides away and only a thin line stays at the screen edge; maximized windows now reach the bottom. Touch the edge with the mouse: it slides up; move away: it slides down after half a second. It stays up while a flyout (clock, quick settings, "…"), a right-click menu or a tray app's menu is open. Tap the Win key: the taskbar comes up on the mouse's monitor and Start opens fully above it (nothing cut off), and it slides down after Start closes. Over a full-screen game or video, touching the edge does not bring it up. Turn the setting off: the taskbar stays and reserves its space again. `taskbar.*.log` shows "taskbar auto-hide changed". (With `[taskbar] auto_hide = "always"` / `"never"` the Windows setting is ignored; in shell mode, where the Settings switch may do nothing, use these.)
 48. **Keyboard only.** Tab goes from the search box through results, detail actions (one by one), footer buttons and back; arrows work inside grids/lists; Esc clears the query, then returns Home, then closes. The focus ring is visible after keyboard moves.
 49. **Footer and power menu.** Account picture (or person glyph) shown; File Explorer and Settings buttons open; power menu shows Lock / Sign out / Sleep / Shut down / Restart (Sleep/Hibernate hidden if unsupported) - test only Lock. "..." -> "Reiniciar el menu Inicio" restarts the launcher.
 50. **English UI.** Switch Windows to English (or `[general] language = "en"`): all Start and taskbar strings are English.
@@ -199,6 +200,7 @@ Installer / binaries: <file name or git commit>
 47 Run commands: PASS / FAIL / notes:
 48 Keyboard only: PASS / FAIL / notes:
 48c Windows' taskbar stays hidden: PASS / FAIL / notes:
+48d Auto-hide: PASS / FAIL / notes:
 49 Footer and power menu: PASS / FAIL / notes:
 50 English UI: PASS / FAIL / notes:
 51 Kill launcher: PASS / FAIL / notes:

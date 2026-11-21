@@ -79,7 +79,21 @@ impl AppBar {
     }
 
     /// Reserve space and return the rectangle the window must occupy.
-    pub fn reserve(&mut self, monitor: RECT, edge: Edge, thickness: i32) -> RECT {
+    /// An auto-hiding bar reserves nothing (maximized windows take the
+    /// whole monitor) but keeps its AppBar registration, for the shell's
+    /// full-screen notifications.
+    pub fn reserve(&mut self, monitor: RECT, edge: Edge, thickness: i32, auto_hide: bool) -> RECT {
+        if self.registered && auto_hide {
+            let mut d = data(self.hwnd);
+            d.uEdge = match edge {
+                Edge::Bottom => ABE_BOTTOM,
+                Edge::Top => ABE_TOP,
+            };
+            d.rc = bar_rect(monitor, edge, 0);
+            // SAFETY: valid APPBARDATA.
+            unsafe { SHAppBarMessage(ABM_SETPOS, &mut d) };
+            return bar_rect(monitor, edge, thickness);
+        }
         if self.registered {
             let mut d = data(self.hwnd);
             d.uEdge = match edge {
@@ -106,6 +120,9 @@ impl AppBar {
             match edge {
                 Edge::Bottom => work.bottom = rect.top,
                 Edge::Top => work.top = rect.bottom,
+            }
+            if auto_hide {
+                work = monitor;
             }
             set_work_area(&work);
             self.work_area_monitor = Some(monitor);

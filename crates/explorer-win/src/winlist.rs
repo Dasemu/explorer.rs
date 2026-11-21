@@ -170,7 +170,8 @@ pub fn fullscreen_windows() -> Vec<(isize, isize)> {
     use windows::Win32::Foundation::RECT;
     use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONULL};
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowRect, IsWindowVisible, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+        GetWindowRect, IsWindowVisible, IsZoomed, GWL_STYLE, WS_CAPTION, WS_EX_TOOLWINDOW,
+        WS_EX_TOPMOST, WS_EX_TRANSPARENT,
     };
     let sr = |r: RECT| ScreenRect {
         left: r.left,
@@ -209,12 +210,15 @@ pub fn fullscreen_windows() -> Vec<(isize, isize)> {
                 continue;
             }
             let overlay = ex & (WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0) != 0;
+            let style = GetWindowLongW(h, GWL_STYLE) as u32;
+            let maximized_framed = IsZoomed(h).as_bool() && style & WS_CAPTION.0 == WS_CAPTION.0;
             cands.push(Candidate {
                 id: h.0 as u64,
                 monitor: mon.0 as isize,
                 rect: sr(r),
                 class: class_name(h),
                 overlay,
+                maximized_framed,
             });
         }
     }

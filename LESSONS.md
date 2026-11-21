@@ -235,3 +235,9 @@ Non-obvious findings. Add an entry whenever something surprises you.
   notifications; a 2 s timer left it covering the Start menu. Re-hide on
   EVENT_OBJECT_SHOW, and stop hiding once the state file is gone (someone
   restored it on purpose).
+- **An auto-hiding taskbar changes the full-screen test.** Once the work
+  area is the whole monitor, every maximized window "covers" it (its frame
+  even overshoots), and the bar would duck under ordinary windows. Only
+  windows without a title bar count as full screen when maximized. The
+  Start menu must keep the bar's thickness free on its own, since the work
+  area no longer does.

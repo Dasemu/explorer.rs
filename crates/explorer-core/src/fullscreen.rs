@@ -63,6 +63,10 @@ pub struct Candidate {
     /// notifications): such windows never end a monitor's full-screen
     /// state, but can be full screen themselves.
     pub overlay: bool,
+    /// Maximized with a title bar: an ordinary window, even when it covers
+    /// the monitor (it does once the work area is the whole monitor, with
+    /// an auto-hiding taskbar).
+    pub maximized_framed: bool,
 }
 
 /// For each monitor, the full-screen window shown on it, if any.
@@ -92,7 +96,7 @@ pub fn fullscreen_per_monitor(
         let Some(&(_, mon)) = monitors.iter().find(|(id, _)| *id == w.monitor) else {
             continue;
         };
-        if covers(w.rect, mon) {
+        if !w.maximized_framed && covers(w.rect, mon) {
             out.push((w.monitor, w.id));
             decided.push(w.monitor);
         } else if !w.overlay {
@@ -153,6 +157,7 @@ mod tests {
             rect,
             class: "App".into(),
             overlay,
+            maximized_framed: false,
         }
     }
 
@@ -200,5 +205,16 @@ mod tests {
         let mons = [(1, MON), (2, RIGHT)];
         let ws = [cand(30, 1, MON, false), cand(31, 2, RIGHT, false)];
         assert_eq!(fullscreen_per_monitor(&ws, &mons), vec![(1, 30), (2, 31)]);
+    }
+
+    #[test]
+    fn maximized_windows_are_not_full_screen_with_an_auto_hiding_taskbar() {
+        let mons = [(1, MON)];
+        let mut max = cand(10, 1, r(-8, -8, 1928, 1088), false);
+        max.maximized_framed = true;
+        assert!(fullscreen_per_monitor(&[max.clone()], &mons).is_empty());
+        // ... and it hides a full-screen window below it.
+        let ws = [max, cand(11, 1, MON, false)];
+        assert!(fullscreen_per_monitor(&ws, &mons).is_empty());
     }
 }

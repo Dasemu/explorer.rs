@@ -7,11 +7,12 @@
 use std::rc::Rc;
 
 use anyhow::Result;
-use explorer_core::anim::{self, Fades};
+use explorer_core::anim::{self, Fades, Tween};
+use explorer_core::autohide::{self, Linger, Reasons};
 use explorer_core::config::{Combine, Edge};
 use explorer_core::flyout_layout::step_level;
 use explorer_core::i18n::{tr, trf};
-use explorer_core::ipc::{LauncherCommand, RunMode, TASKBAR_WINDOW_CLASS};
+use explorer_core::ipc::{LauncherCommand, RunMode, LAUNCHER_WINDOW_CLASS, TASKBAR_WINDOW_CLASS};
 use explorer_core::layout::Rect;
 use explorer_core::supervisor::{EXIT_RESTART, EXIT_SHUTDOWN_ALL};
 use explorer_core::system_glyphs::{self as sg, NetKind};
@@ -28,22 +29,22 @@ use explorer_win::util::{u64_to_hwnd, wide};
 use explorer_win::window::{self, CreateParams, Handler};
 use explorer_win::windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use explorer_win::windows::Win32::Graphics::Gdi::{
-    BeginPaint, ClientToScreen, EndPaint, InvalidateRect, MonitorFromWindow, ScreenToClient,
-    MONITOR_DEFAULTTONEAREST, PAINTSTRUCT,
+    BeginPaint, ClientToScreen, CreateRectRgn, EndPaint, InvalidateRect, MonitorFromPoint,
+    MonitorFromWindow, ScreenToClient, SetWindowRgn, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT,
 };
 use explorer_win::windows::Win32::System::Shutdown::{ExitWindowsEx, EWX_LOGOFF, SHUTDOWN_REASON};
 use explorer_win::windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_SHIFT,
 };
 use explorer_win::windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetClientRect, GetCursorPos, GetWindowRect,
-    KillTimer, PostMessageW, SetTimer, SetWindowPos, HWND_NOTOPMOST, HWND_TOPMOST, MA_NOACTIVATE,
-    MF_GRAYED, MF_SEPARATOR, MF_STRING, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CLOSE,
-    WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SIZE, WM_TIMER, WM_WINDOWPOSCHANGED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, FindWindowW, GetClientRect, GetCursorPos,
+    GetWindowRect, IsWindowVisible, KillTimer, PostMessageW, SetTimer, SetWindowPos,
+    HWND_NOTOPMOST, HWND_TOPMOST, MA_NOACTIVATE, MF_GRAYED, MF_SEPARATOR, MF_STRING,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, TPM_NONOTIFY,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_CREATE,
+    WM_DESTROY, WM_DPICHANGED, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP,
+    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE,
+    WM_TIMER, WM_WINDOWPOSCHANGED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::app::Shared;
@@ -59,6 +60,11 @@ pub(crate) const WM_APP_RAISE: u32 = WM_APP + 40;
 /// Posted by the controller when the full-screen windows changed (see
 /// `Shared::fullscreen`).
 pub(crate) const WM_APP_FULLSCREEN: u32 = WM_APP + 41;
+/// Posted by the controller when `Shared::auto_hide` changed.
+pub(crate) const WM_APP_AUTOHIDE: u32 = WM_APP + 42;
+/// Posted by the controller when the Start menu opens with the Win key:
+/// an auto-hidden bar on the pointer's monitor comes up with it.
+pub(crate) const WM_APP_REVEAL: u32 = WM_APP + 43;
 
 /// WinUser.h value; not exported by the `windows` crate module we use.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -68,6 +74,11 @@ const TIMER_HOVER: usize = 10;
 const TIMER_ANIM: usize = 11;
 /// Hover delay before thumbnails appear (Windows uses ~400 ms).
 const HOVER_MS: u32 = 400;
+/// Auto-hide: checks whether the shown bar is still wanted.
+const TIMER_AUTOHIDE: usize = 12;
+const AUTOHIDE_POLL_MS: u32 = 100;
+/// Auto-hide slide frames.
+const TIMER_SLIDE: usize = 13;
 
 /// Logical pixels the pointer must move before a press becomes a drag.
 const DRAG_THRESHOLD: f32 = 6.0;
@@ -182,6 +193,15 @@ pub(crate) struct Bar {
     abn_fullscreen: bool,
     /// Our own detection: the full-screen window in front on this monitor.
     fullscreen_window: Option<HWND>,
+    /// Auto-hide is on (copied from `Shared::auto_hide`).
+    auto_hide: bool,
+    /// How far the bar is slid out of sight: 0 shown .. 1 hidden.
+    hidden: f32,
+    /// Running slide: (tween, from, to).
+    slide: Option<(Tween, f32, f32)>,
+    linger: Linger,
+    /// Where the bar sits when shown.
+    base_rect: RECT,
 }
 
 /// Key under which a hit's hover highlight animates.
@@ -258,6 +278,228 @@ impl Bar {
         }
     }
 
+    // -- auto-hide ----------------------------------------------------------
+
+    /// Pixels the bar is currently pushed past its edge.
+    fn slide_offset(&self) -> i32 {
+        if !self.auto_hide {
+            return 0;
+        }
+        let r = self.base_rect;
+        let peek = (autohide::PEEK * self.scale()).round().max(1.0) as i32;
+        autohide::offset(r.bottom - r.top, peek, self.hidden)
+    }
+
+    /// `base_rect` slid out by the current offset.
+    fn slid_rect(&self) -> RECT {
+        let off = self.slide_offset();
+        let r = self.base_rect;
+        let dy = match self.shared.config.taskbar.position {
+            Edge::Bottom => off,
+            Edge::Top => -off,
+        };
+        RECT {
+            top: r.top + dy,
+            bottom: r.bottom + dy,
+            ..r
+        }
+    }
+
+    /// Clip a slid-out bar to its monitor: the part past the edge would
+    /// otherwise show on a monitor next to it.
+    fn apply_region(&self, hwnd: HWND) {
+        let off = self.slide_offset();
+        let r = self.base_rect;
+        let (w, h) = (r.right - r.left, r.bottom - r.top);
+        // SAFETY: SetWindowRgn takes ownership of the region.
+        unsafe {
+            if off == 0 {
+                SetWindowRgn(hwnd, None, true);
+            } else {
+                let rgn = match self.shared.config.taskbar.position {
+                    Edge::Bottom => CreateRectRgn(0, 0, w, h - off),
+                    Edge::Top => CreateRectRgn(0, off, w, h),
+                };
+                SetWindowRgn(hwnd, Some(rgn), true);
+            }
+        }
+    }
+
+    /// Move the window to the current slide position.
+    fn place(&self, hwnd: HWND) {
+        let r = self.slid_rect();
+        // SAFETY: moving our own window.
+        let _ = unsafe {
+            SetWindowPos(
+                hwnd,
+                None,
+                r.left,
+                r.top,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+        };
+        self.apply_region(hwnd);
+    }
+
+    /// Where the bar is heading: 0 shown, 1 hidden.
+    fn slide_target(&self) -> f32 {
+        self.slide.as_ref().map_or(self.hidden, |s| s.2)
+    }
+
+    /// Slide in (`to` = 0) or out (`to` = 1).
+    fn slide_to(&mut self, hwnd: HWND, to: f32) {
+        if self.slide_target() == to {
+            return;
+        }
+        self.linger.reset();
+        if to == 0.0 {
+            // While shown, check regularly whether it is still wanted.
+            // SAFETY: our own timer.
+            unsafe { SetTimer(Some(hwnd), TIMER_AUTOHIDE, AUTOHIDE_POLL_MS, None) };
+        } else {
+            self.hide_tooltip();
+            if flyout::is_peek(&self.shared) {
+                flyout::close(&self.shared);
+            }
+        }
+        if !explorer_win::theme::animations_enabled(self.shared.config.general.animations) {
+            self.slide = None;
+            self.finish_slide(hwnd, to);
+            return;
+        }
+        let from = self.hidden;
+        self.slide = Some((
+            Tween::new(std::time::Instant::now(), autohide::SLIDE),
+            from,
+            to,
+        ));
+        // SAFETY: our own timer.
+        unsafe {
+            SetTimer(
+                Some(hwnd),
+                TIMER_SLIDE,
+                anim::FRAME.as_millis() as u32,
+                None,
+            )
+        };
+    }
+
+    fn finish_slide(&mut self, hwnd: HWND, to: f32) {
+        self.hidden = to;
+        self.place(hwnd);
+        if to == 1.0 {
+            // Hidden: the pointer touching the strip brings it back.
+            // SAFETY: our own timer.
+            let _ = unsafe { KillTimer(Some(hwnd), TIMER_AUTOHIDE) };
+        }
+    }
+
+    fn slide_frame(&mut self, hwnd: HWND) {
+        let Some((tween, from, to)) = self.slide else {
+            // SAFETY: our own timer.
+            let _ = unsafe { KillTimer(Some(hwnd), TIMER_SLIDE) };
+            return;
+        };
+        let now = std::time::Instant::now();
+        if tween.done(now) {
+            self.slide = None;
+            // SAFETY: our own timer.
+            let _ = unsafe { KillTimer(Some(hwnd), TIMER_SLIDE) };
+            self.finish_slide(hwnd, to);
+            return;
+        }
+        self.hidden = anim::lerp(from, to, anim::ease_out_cubic(tween.progress(now)));
+        self.place(hwnd);
+    }
+
+    /// The pointer is over this bar's visible part.
+    fn pointer_on_bar(&self, hwnd: HWND) -> bool {
+        let mut pt = POINT::default();
+        let mut r = RECT::default();
+        // SAFETY: valid out-pointers.
+        unsafe {
+            if GetCursorPos(&mut pt).is_err() || GetWindowRect(hwnd, &mut r).is_err() {
+                return false;
+            }
+        }
+        let m = self.monitor.rect;
+        pt.x >= r.left.max(m.left)
+            && pt.x < r.right.min(m.right)
+            && pt.y >= r.top.max(m.top)
+            && pt.y < r.bottom.min(m.bottom)
+    }
+
+    /// The Start menu is open on this bar's monitor.
+    fn launcher_here(&self) -> bool {
+        let class = wide(LAUNCHER_WINDOW_CLASS);
+        // SAFETY: plain queries; the class string outlives the call.
+        unsafe {
+            let Ok(w) = FindWindowW(
+                explorer_win::windows::core::PCWSTR(class.as_ptr()),
+                explorer_win::windows::core::PCWSTR::null(),
+            ) else {
+                return false;
+            };
+            IsWindowVisible(w).as_bool()
+                && MonitorFromWindow(w, MONITOR_DEFAULTTONEAREST) == self.monitor.handle
+        }
+    }
+
+    /// A context menu is open (ours, or a tray app's).
+    fn menu_open() -> bool {
+        let class = wide("#32768");
+        // SAFETY: plain queries; the class string outlives the call.
+        unsafe {
+            FindWindowW(
+                explorer_win::windows::core::PCWSTR(class.as_ptr()),
+                explorer_win::windows::core::PCWSTR::null(),
+            )
+            .is_ok_and(|w| IsWindowVisible(w).as_bool())
+        }
+    }
+
+    fn autohide_tick(&mut self, hwnd: HWND) {
+        if !self.auto_hide {
+            // SAFETY: our own timer.
+            let _ = unsafe { KillTimer(Some(hwnd), TIMER_AUTOHIDE) };
+            return;
+        }
+        let reasons = Reasons {
+            pointer: self.pointer_on_bar(hwnd),
+            popup: flyout::is_open(&self.shared) || Self::menu_open(),
+            launcher: self.launcher_here(),
+            dragging: self.press.as_ref().is_some_and(|p| p.dragging),
+            fullscreen: self.in_fullscreen(),
+        };
+        let wanted = autohide::wants_shown(&reasons);
+        if self.linger.update(wanted, std::time::Instant::now()) {
+            self.slide_to(hwnd, 1.0);
+        } else if wanted && self.slide_target() != 0.0 {
+            self.slide_to(hwnd, 0.0);
+        }
+    }
+
+    /// Auto-hide was switched on or off: start shown either way (with
+    /// auto-hide on, it slides away once the pointer is elsewhere).
+    fn set_auto_hide(&mut self, hwnd: HWND, on: bool) {
+        self.auto_hide = on;
+        self.slide = None;
+        self.hidden = 0.0;
+        self.linger.reset();
+        // SAFETY: our own timers.
+        unsafe {
+            let _ = KillTimer(Some(hwnd), TIMER_SLIDE);
+            if on {
+                SetTimer(Some(hwnd), TIMER_AUTOHIDE, AUTOHIDE_POLL_MS, None);
+            } else {
+                let _ = KillTimer(Some(hwnd), TIMER_AUTOHIDE);
+            }
+        }
+        self.position(hwnd);
+    }
+
     pub fn create(shared: Rc<Shared>, m: Monitor) -> Result<HWND> {
         let rect = explorer_win::appbar::bar_rect(
             m.rect,
@@ -289,6 +531,11 @@ impl Bar {
                 anim_timer: false,
                 abn_fullscreen: false,
                 fullscreen_window: None,
+                auto_hide: false,
+                hidden: 0.0,
+                slide: None,
+                linger: Linger::default(),
+                base_rect: rect,
             }),
         )
     }
@@ -383,10 +630,13 @@ impl Bar {
         }
         let thickness = thickness(&self.shared, self.monitor.dpi);
         let edge = self.shared.config.taskbar.position;
+        let auto_hide = self.auto_hide;
         let rect = match self.appbar.as_mut() {
-            Some(ab) => ab.reserve(self.monitor.rect, edge, thickness),
+            Some(ab) => ab.reserve(self.monitor.rect, edge, thickness, auto_hide),
             None => explorer_win::appbar::bar_rect(self.monitor.rect, edge, thickness),
         };
+        self.base_rect = rect;
+        let rect = self.slid_rect();
         // SAFETY: positioning our own window.
         let _ = unsafe {
             SetWindowPos(
@@ -399,6 +649,7 @@ impl Bar {
                 SWP_NOACTIVATE | SWP_SHOWWINDOW,
             )
         };
+        self.apply_region(hwnd);
         // A full-screen game that changed the resolution is still in front.
         if self.in_fullscreen() {
             self.apply_z_order(hwnd);
@@ -1307,6 +1558,11 @@ impl Handler for Bar {
         match msg {
             WM_CREATE => {
                 self.appbar = Some(AppBar::new(hwnd, WM_APP_APPBAR, self.shared.mode));
+                self.auto_hide = self.shared.auto_hide.get();
+                if self.auto_hide {
+                    // SAFETY: our own timer.
+                    unsafe { SetTimer(Some(hwnd), TIMER_AUTOHIDE, AUTOHIDE_POLL_MS, None) };
+                }
                 // Position outside WM_CREATE to avoid re-entrancy.
                 // SAFETY: posting to our own window.
                 let _ = unsafe { PostMessageW(Some(hwnd), WM_APP_POSITION, WPARAM(0), LPARAM(0)) };
@@ -1322,6 +1578,35 @@ impl Handler for Bar {
                     .find(|(m, _)| *m == mon)
                     .map(|(_, w)| HWND(*w as *mut core::ffi::c_void));
                 self.apply_z_order(hwnd);
+                Some(LRESULT(0))
+            }
+            WM_APP_AUTOHIDE => {
+                let on = self.shared.auto_hide.get();
+                if on != self.auto_hide {
+                    self.set_auto_hide(hwnd, on);
+                }
+                Some(LRESULT(0))
+            }
+            WM_APP_REVEAL => {
+                if self.auto_hide {
+                    let mut pt = POINT::default();
+                    // SAFETY: plain queries.
+                    let here = unsafe {
+                        GetCursorPos(&mut pt).is_ok()
+                            && MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) == self.monitor.handle
+                    };
+                    if here {
+                        self.slide_to(hwnd, 0.0);
+                    }
+                }
+                Some(LRESULT(0))
+            }
+            WM_TIMER if wparam.0 == TIMER_AUTOHIDE => {
+                self.autohide_tick(hwnd);
+                Some(LRESULT(0))
+            }
+            WM_TIMER if wparam.0 == TIMER_SLIDE => {
+                self.slide_frame(hwnd);
                 Some(LRESULT(0))
             }
             WM_APP_RAISE => {
@@ -1392,6 +1677,10 @@ impl Handler for Bar {
                 Some(LRESULT(MA_NOACTIVATE as isize))
             }
             WM_MOUSEMOVE => {
+                // The pointer touched the strip of the auto-hidden bar.
+                if self.auto_hide && self.slide_target() != 0.0 && !self.in_fullscreen() {
+                    self.slide_to(hwnd, 0.0);
+                }
                 if !self.tracking {
                     let mut tme = TRACKMOUSEEVENT {
                         cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,

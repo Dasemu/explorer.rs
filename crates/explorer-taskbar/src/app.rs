@@ -29,7 +29,7 @@ use std::time::{Duration, Instant, SystemTime};
 use explorer_core::calendar;
 use explorer_core::catalog::{Catalog, LaunchTarget};
 use explorer_core::clock::{self, DateTime};
-use explorer_core::config::{Alignment, Config, MonitorSelection};
+use explorer_core::config::{Alignment, AutoHide, Config, MonitorSelection};
 use explorer_core::i18n::Lang;
 use explorer_core::image::SharedImage;
 use explorer_core::ipc::{LauncherCommand, RunMode, TASKBAR_WINDOW_CLASS};
@@ -188,6 +188,9 @@ pub(crate) struct Shared {
     /// Closes a sticky flyout on a click on a window that never activates.
     pub flyout_clicks: RefCell<Option<explorer_win::keyboard::ClickWatcher>>,
     pub flyout_closed: RefCell<Option<(flyout::Opener, Instant)>>,
+    /// The bars auto-hide (config, or Windows' setting); see
+    /// `Controller::check_auto_hide`.
+    pub auto_hide: Cell<bool>,
     show_desktop: RefCell<ShowDesktop>,
     show_desktop_at: Cell<Option<Instant>>,
     pub controller: Cell<HWND>,
@@ -688,6 +691,10 @@ pub fn run(args: Args) -> i32 {
         fullscreen: RefCell::new(Vec::new()),
         flyout_clicks: RefCell::new(None),
         flyout_closed: RefCell::new(None),
+        auto_hide: Cell::new(auto_hide_wanted(
+            config.taskbar.auto_hide,
+            &paths.windows_taskbar_state_file(),
+        )),
         show_desktop: RefCell::new(ShowDesktop::default()),
         show_desktop_at: Cell::new(None),
         controller: Cell::new(HWND::default()),
@@ -717,6 +724,7 @@ pub fn run(args: Args) -> i32 {
             ticks: 0,
             win_taskbar_state: (mode == RunMode::Dev && shared.config.taskbar.hide_windows_taskbar)
                 .then(|| paths.windows_taskbar_state_file()),
+            taskbar_state_file: paths.windows_taskbar_state_file(),
         }),
     ) {
         Ok(h) => h,
@@ -756,9 +764,39 @@ struct Controller {
     ticks: u64,
     /// Set while Windows' taskbar is to be hidden (dev mode + config).
     win_taskbar_state: Option<std::path::PathBuf>,
+    /// Where the user's own Windows taskbar auto-hide choice is kept while
+    /// we hide that taskbar (read for `auto_hide = "system"`).
+    taskbar_state_file: std::path::PathBuf,
+}
+
+/// Whether the bars should auto-hide.
+fn auto_hide_wanted(setting: AutoHide, state_file: &std::path::Path) -> bool {
+    match setting {
+        AutoHide::Always => true,
+        AutoHide::Never => false,
+        AutoHide::System => explorer_win::win_taskbar::system_autohide(state_file),
+    }
 }
 
 impl Controller {
+    /// Follow Windows' "Automatically hide the taskbar" setting.
+    fn check_auto_hide(&mut self) {
+        let on = auto_hide_wanted(
+            self.shared.config.taskbar.auto_hide,
+            &self.taskbar_state_file,
+        );
+        if on == self.shared.auto_hide.get() {
+            return;
+        }
+        tracing::info!(auto_hide = on, "taskbar auto-hide changed");
+        self.shared.auto_hide.set(on);
+        for &b in self.shared.bars.borrow().iter() {
+            // SAFETY: posting to our own window.
+            let _ =
+                unsafe { PostMessageW(Some(b), crate::bar::WM_APP_AUTOHIDE, WPARAM(0), LPARAM(0)) };
+        }
+    }
+
     /// Tell the bars when a monitor starts or stops showing a full-screen
     /// app. Explorer's AppBar manager does that with ABN_FULLSCREENAPP, but
     /// it is not there when explorer.rs is the shell.
@@ -1088,6 +1126,13 @@ impl Handler for Controller {
                 // (otherwise typing can go to the previous window).
                 explorer_win::keyboard::claim_foreground_rights();
                 explorer_win::ipc::send_launcher_command(LauncherCommand::Toggle);
+                // An auto-hidden bar comes up with the Start menu.
+                for &b in self.shared.bars.borrow().iter() {
+                    // SAFETY: posting to our own window.
+                    let _ = unsafe {
+                        PostMessageW(Some(b), crate::bar::WM_APP_REVEAL, WPARAM(0), LPARAM(0))
+                    };
+                }
                 // Explorer may reveal its (auto-hidden) taskbar on the key.
                 self.rehide_win_taskbar();
                 Some(LRESULT(0))
@@ -1125,9 +1170,11 @@ impl Handler for Controller {
                 Some(LRESULT(1))
             }
             WM_SETTINGCHANGE => {
-                // Theme ("ImmersiveColorSet") or taskbar alignment changed.
-                // Cheap registry reads; no repositioning, so our own
-                // SPI_SETWORKAREA notifications cannot loop.
+                // Theme ("ImmersiveColorSet"), taskbar alignment or auto-hide
+                // ("TraySettings") changed. Cheap reads; the bars only move
+                // when auto-hide really changed, so our own SPI_SETWORKAREA
+                // notifications cannot loop.
+                self.check_auto_hide();
                 if self.shared.reload_appearance() {
                     tracing::info!("appearance changed");
                     self.shared.invalidate_bars();

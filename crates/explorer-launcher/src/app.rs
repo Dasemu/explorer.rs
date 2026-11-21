@@ -2041,8 +2041,10 @@ impl Launcher {
     fn show(&mut self, hwnd: HWND) {
         self.reload_palette();
         self.utc_offset = crate::sys::utc_offset_secs();
-        // Anchor to the monitor under the mouse cursor, above the taskbar
-        // (the work area excludes it), centred or left like the taskbar.
+        // Anchor to the monitor under the mouse cursor, above the taskbar,
+        // centred or left like the taskbar. The work area excludes the
+        // taskbar unless it auto-hides; then it slides in under us, so keep
+        // its thickness free in either case.
         let mut pt = POINT::default();
         // SAFETY: plain FFI calls with valid pointers.
         unsafe {
@@ -2051,7 +2053,12 @@ impl Launcher {
             if let Some(m) = explorer_win::monitors::query(mon) {
                 let scale = explorer_win::dpi::scale(m.dpi);
                 self.scale = scale;
-                let work = m.work;
+                let mut work = m.work;
+                let bar = self.s(self.config.taskbar.height as f32) as i32;
+                match self.config.taskbar.position {
+                    Edge::Bottom => work.bottom = work.bottom.min(m.rect.bottom - bar),
+                    Edge::Top => work.top = work.top.max(m.rect.top + bar),
+                }
                 let ww = work.right - work.left;
                 let wh = work.bottom - work.top;
                 let margin = self.s(12.0) as i32;
