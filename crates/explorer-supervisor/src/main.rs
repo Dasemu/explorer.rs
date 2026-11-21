@@ -10,6 +10,8 @@
 //!   indexd) as its own process and restarts it independently according to
 //!   `explorer_core::supervisor`; reloads the config file when it changes;
 //!   in shell mode runs the startup apps once per sign-in.
+//! - `--settings`: the settings window (native Win32 controls, see
+//!   `settings_ui`); edits the config file in place.
 //! - `--restore-explorer`, `--edit-config`, `--status`: one-shot commands.
 //!
 //! Safety rule: without an explicit mode or command the program only prints
@@ -24,6 +26,8 @@ use clap::Parser;
 use explorer_core::ipc::RunMode;
 
 mod cli;
+#[cfg(windows)]
+mod settings_ui;
 mod supervise;
 #[cfg(windows)]
 mod win_host;
@@ -63,15 +67,19 @@ pub struct Args {
     pub only: Option<String>,
     /// Restore Windows Explorer as this user's shell, stop explorer.rs and
     /// start explorer.exe if it is not running.
-    #[arg(long, conflicts_with_all = ["dev", "shell", "supervise", "edit_config", "status", "resume"])]
+    #[arg(long, conflicts_with_all = ["dev", "shell", "supervise", "edit_config", "settings", "status", "resume"])]
     pub restore_explorer: bool,
     /// Create the config file from the default if missing and open it in
     /// Notepad.
-    #[arg(long, conflicts_with_all = ["dev", "shell", "supervise", "status", "resume"])]
+    #[arg(long, conflicts_with_all = ["dev", "shell", "supervise", "settings", "status", "resume"])]
     pub edit_config: bool,
+    /// Open the settings window (edits the config file; creates it from
+    /// the default on the first save).
+    #[arg(long, conflicts_with_all = ["dev", "shell", "supervise", "status", "resume"])]
+    pub settings: bool,
     /// Ask the running explorer.rs to restart all its components (same as
     /// Ctrl+Alt+Shift+R).
-    #[arg(long, conflicts_with_all = ["dev", "shell", "supervise", "restore_explorer", "edit_config", "status", "resume"])]
+    #[arg(long, conflicts_with_all = ["dev", "shell", "supervise", "restore_explorer", "edit_config", "settings", "status", "resume"])]
     pub restart: bool,
     /// Print a diagnostics report (version, mode, components, shell
     /// registration, config validity, recent crash-log events).
@@ -97,6 +105,9 @@ fn main() {
     }
     if args.edit_config {
         std::process::exit(cli::edit_config(args.config.as_deref()));
+    }
+    if args.settings {
+        std::process::exit(cli::settings(args.config.as_deref()));
     }
     if args.status {
         std::process::exit(cli::status(args.config.as_deref(), args.output.as_deref()));
@@ -144,6 +155,15 @@ mod tests {
         assert!(Args::try_parse_from(["explorer-rs", "--output", "x.txt"]).is_err());
         assert!(Args::try_parse_from(["explorer-rs", "--edit-config", "--status"]).is_err());
         assert!(Args::try_parse_from(["explorer-rs", "--restart"]).is_ok());
+        assert!(Args::try_parse_from(["explorer-rs", "--settings"]).is_ok());
+        assert!(
+            Args::try_parse_from(["explorer-rs", "--settings", "--config", "c.toml"])
+                .unwrap()
+                .settings
+        );
+        for other in ["--dev", "--shell", "--edit-config", "--status", "--restart"] {
+            assert!(Args::try_parse_from(["explorer-rs", "--settings", other]).is_err());
+        }
         assert!(Args::try_parse_from(["explorer-rs", "--restart", "--dev"]).is_err());
         let a = Args::try_parse_from(["explorer-rs", "--shell", "--resume"]).unwrap();
         assert!(a.shell && a.resume);

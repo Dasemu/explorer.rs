@@ -62,11 +62,13 @@ duplicated in a second language.
   re-created if it is a junction) rather than `%TEMP%`, so nothing unprivileged
   can swap the copy or plant DLLs next to it before it runs elevated. The
   copy deletes itself at reboot.
-- **Settings shortcut** runs `explorer-rs.exe --edit-config` (asInvoker,
+- **Settings shortcut** runs `explorer-rs.exe --settings` (asInvoker,
   as the signed-in user), not a mode of the elevated setup, which would
   prompt UAC on each click and edit the wrong user's file after
   over-the-shoulder elevation. (An earlier separate `explorer-rs-settings.exe`
-  was folded into the supervisor's `--edit-config`.)
+  was folded into the supervisor's `--edit-config`, which opened the file in
+  Notepad; `--settings` is now a native settings window in the same exe,
+  and `--edit-config` remains as its "Edit config file…" button.)
 - **Resources** for all binaries come from one shared `build.rs` include
   (`assets/build/resources.rs`) that calls `llvm-rc` directly; no
   `embed-resource` dependency is needed.

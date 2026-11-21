@@ -76,6 +76,7 @@ linked per area.
 | Emergency hotkeys Ctrl+Alt+Shift+E (Windows Explorer) / Ctrl+Alt+Shift+R (restart all; dev mode while the Explorer shell runs) |
 | Graceful stop via `ExplorerRs.Shutdown` (WM_CLOSE ignored; unexpected window loss → restart); apps launched from explorer.rs survive its restart (job breakaway); `--resume` for restarts by setup; orphaned-supervisor handling (unverified on Windows) |
 | `--restore-explorer` (guardian identified by its window, graceful stop, Explorer started afterwards), `--restart`, `--edit-config`, `--status [--output]` |
+| Settings window `--settings` (native Win32 controls, bilingual, dark/light; saves only the changed keys with `toml_edit`, validated and written atomically; "Save and restart" uses the Ctrl+Alt+Shift+R path) (unverified on Windows) |
 | Config hot reload (2 s polling, per-component restart); `supervisor.file_search` (auto/on/off, HKLM `FileSearch`) |
 | Session-end detection (no restarts and no crash counting during sign-out) |
 | Shell mode: "shell ready" events; startup apps (Run, RunOnce, Startup folder, StartupApproved) |

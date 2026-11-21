@@ -1571,7 +1571,7 @@ impl Launcher {
                     tr(l, "Start settings", "Configuración de Inicio").into(),
                 ),
                 (
-                    CMD_EDIT_CONFIG,
+                    CMD_SETTINGS,
                     tr(l, "explorer.rs settings", "Configuración de explorer.rs").into(),
                 ),
                 (0, String::new()),
@@ -1594,9 +1594,9 @@ impl Launcher {
                 String::new(),
                 false,
             ),
-            CMD_EDIT_CONFIG => {
+            CMD_SETTINGS => {
                 self.hide(hwnd);
-                run_supervisor_cli("--edit-config");
+                run_supervisor_cli("--settings");
             }
             CMD_RESTART_ALL => {
                 self.hide(hwnd);
@@ -3404,7 +3404,7 @@ impl Handler for Launcher {
     }
 }
 
-const CMD_EDIT_CONFIG: u32 = 0xE101;
+const CMD_SETTINGS: u32 = 0xE101;
 const CMD_RESTART_ALL: u32 = 0xE102;
 
 /// Run `explorer-rs.exe <arg>` (the supervisor/guardian binary next to us).

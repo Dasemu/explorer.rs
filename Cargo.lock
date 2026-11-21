@@ -355,7 +355,7 @@ dependencies = [
 
 [[package]]
 name = "explorer-core"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "criterion",
@@ -371,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "explorer-desktop"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "clap",
@@ -382,7 +382,7 @@ dependencies = [
 
 [[package]]
 name = "explorer-index"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "crc32fast",
@@ -401,7 +401,7 @@ dependencies = [
 
 [[package]]
 name = "explorer-index-client"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "explorer-index",
  "tempfile",
@@ -410,7 +410,7 @@ dependencies = [
 
 [[package]]
 name = "explorer-indexd"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "clap",
@@ -424,7 +424,7 @@ dependencies = [
 
 [[package]]
 name = "explorer-launcher"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "clap",
@@ -436,7 +436,7 @@ dependencies = [
 
 [[package]]
 name = "explorer-setup"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "explorer-core",
@@ -451,19 +451,21 @@ dependencies = [
 
 [[package]]
 name = "explorer-supervisor"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "clap",
  "explorer-core",
  "explorer-win",
  "tempfile",
+ "toml",
+ "toml_edit",
  "tracing",
 ]
 
 [[package]]
 name = "explorer-taskbar"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "clap",
@@ -474,7 +476,7 @@ dependencies = [
 
 [[package]]
 name = "explorer-win"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "explorer-core",
@@ -1048,7 +1050,7 @@ dependencies = [
  "indexmap",
  "serde_core",
  "serde_spanned",
- "toml_datetime",
+ "toml_datetime 0.7.5+spec-1.1.0",
  "toml_parser",
  "toml_writer",
  "winnow 0.7.15",
@@ -1061,6 +1063,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92e1cfed4a3038bc5a127e35a2d360f145e1f4b971b551a2ba5fd7aedf7e1347"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "toml_datetime"
+version = "1.1.3+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "173f25c883cd2176a2d8212155638c0a60d484a9d84546d270866f40f56b6e49"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
+name = "toml_edit"
+version = "0.25.17+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3641d5bbb5349a79e1020a242d251efbc546ad8048d133958323ce9c40a9c9c"
+dependencies = [
+ "indexmap",
+ "toml_datetime 1.1.3+spec-1.1.0",
+ "toml_parser",
+ "toml_writer",
+ "winnow 1.0.4",
 ]
 
 [[package]]
@@ -1471,6 +1495,9 @@ name = "winnow"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "winvd"

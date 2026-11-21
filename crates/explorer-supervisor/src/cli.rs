@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Guardian entry point and the one-shot commands (`--restore-explorer`,
-//! `--edit-config`, `--status`).
+//! `--edit-config`, `--settings`, `--status`).
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -43,7 +43,7 @@ pub fn supervisor_args(mode: RunMode, args: &Args) -> Vec<OsString> {
     v
 }
 
-fn config_path(paths: &AppPaths, over: Option<&Path>) -> PathBuf {
+pub(crate) fn config_path(paths: &AppPaths, over: Option<&Path>) -> PathBuf {
     over.map(Path::to_path_buf)
         .unwrap_or_else(|| paths.config_file())
 }
@@ -266,6 +266,23 @@ pub fn edit_config(over: Option<&Path>) -> i32 {
     {
         println!("{}", path.display());
         0
+    }
+}
+
+/// `--settings`: the settings window.
+pub fn settings(over: Option<&Path>) -> i32 {
+    let path = config_path(&AppPaths::from_env(), over);
+    #[cfg(windows)]
+    {
+        crate::settings_ui::run(path, over.map(Path::to_path_buf))
+    }
+    #[cfg(not(windows))]
+    {
+        eprintln!(
+            "--settings only works on Windows; edit {} instead",
+            path.display()
+        );
+        1
     }
 }
 

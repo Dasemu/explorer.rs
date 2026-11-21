@@ -64,7 +64,7 @@ The installer creates these Start menu entries (all users,
 |---|---|
 | explorer.rs | `explorer-rs.exe --dev` |
 | Restore Windows Explorer | `explorer-rs.exe --restore-explorer` |
-| explorer.rs settings | `explorer-rs.exe --edit-config` (runs as you, not elevated): creates `%APPDATA%\explorer-rs\config.toml` if missing and opens it in Notepad |
+| explorer.rs settings | `explorer-rs.exe --settings` (runs as you, not elevated): the settings window, which edits `%APPDATA%\explorer-rs\config.toml` in place (comments kept) and creates it from the default on the first save. `explorer-rs.exe --edit-config` (also its "Edit config file…" button) creates the file if missing and opens it in Notepad |
 | Uninstall explorer.rs | `uninstall.exe --uninstall` |
 
 **Upgrading:** run the newer installer. Your previous choices are

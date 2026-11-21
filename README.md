@@ -33,7 +33,9 @@ Press **Ctrl+Alt+Shift+E** to start Windows Explorer, or use Start menu ->
 - Fast file search (NTFS MFT/USN index)
 - English and Spanish
 
-Configuration: `%APPDATA%\explorer-rs\config.toml` (see `config/default.toml`).
+Configuration: Start menu -> "explorer.rs settings" (`explorer-rs.exe --settings`)
+opens a settings window; it edits `%APPDATA%\explorer-rs\config.toml` (see
+`config/default.toml`), which `explorer-rs.exe --edit-config` opens in Notepad.
 Logs: `%LOCALAPPDATA%\explorer-rs\logs\`.
 
 ## Documentation
