@@ -80,7 +80,7 @@ explorer-rs-setup.exe --silent [--mode=alongside|shell|none] [--file-search=on|o
 ```
 
 Without options, a silent install uses the previous choices, or the defaults
-(alongside, fast file search on, start now). `/silent` and `/?` work too.
+(shell mode, fast file search on, start now). `/silent` and `/?` work too.
 
 | Exit code | Meaning |
 |---|---|
