@@ -4,7 +4,7 @@
 //! with a BOM (see [`to_utf16_file`]); schtasks rejects some UTF-8 files.
 
 /// Folder + name of the elevated index helper task.
-pub const INDEX_HELPER_TASK: &str = r"\explorer-rs\IndexHelper";
+pub const INDEX_HELPER_TASK: &str = explorer_core::guardian::INDEX_HELPER_TASK;
 /// Name used by scripts/install-index-helper.ps1 before the installer
 /// existed; removed on install so only one helper task remains.
 pub const LEGACY_INDEX_HELPER_TASK: &str = r"\explorer-rs\index helper";
