@@ -16,6 +16,11 @@ Download `explorer-rs-setup-<version>-x64.exe` and run it. By default
 explorer.rs runs alongside Windows Explorer; replacing the shell is an option.
 See [docs/INSTALL.md](docs/INSTALL.md). Try shell mode in a VM first.
 
+Updates: explorer.rs checks for new releases once a day and reminds you every
+few days while one is available; **Update now** downloads, verifies and
+installs it (keeping your settings and start mode). Turn it off in
+Settings -> Updates. Details: [docs/INSTALL.md](docs/INSTALL.md#updates).
+
 ## If something goes wrong
 
 Press **Ctrl+Alt+Shift+E** to start Windows Explorer, or use Start menu ->

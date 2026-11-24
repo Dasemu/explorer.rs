@@ -15,6 +15,8 @@ mod bar;
 #[cfg(windows)]
 mod flyout;
 #[cfg(windows)]
+mod update_toast;
+#[cfg(windows)]
 mod workers;
 
 #[derive(Parser, Debug)]

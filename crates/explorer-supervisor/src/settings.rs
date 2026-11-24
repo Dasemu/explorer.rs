@@ -230,6 +230,21 @@ pub const SECTIONS: &[Section] = &[
         ],
     },
     Section {
+        title: t("Updates", "Actualizaciones"),
+        fields: &[f(
+            UPDATES_KEY,
+            t(
+                "Check for updates automatically",
+                "Buscar actualizaciones automáticamente",
+            ),
+            t(
+                "Once a day, ask GitHub whether a new explorer.rs version was released. While one is available, a small reminder appears next to the clock every few days. Nothing is installed without your click.",
+                "Una vez al día, preguntar a GitHub si hay una nueva versión de explorer.rs. Mientras haya una, aparece un pequeño aviso junto al reloj cada pocos días. No se instala nada sin que hagas clic.",
+            ),
+            Kind::Bool,
+        )],
+    },
+    Section {
         title: t("Taskbar", "Barra de tareas"),
         fields: &[
             f(
@@ -645,6 +660,18 @@ pub const SECTIONS: &[Section] = &[
         ],
     },
 ];
+
+/// The key of the automatic update check; its page also shows the update
+/// status and buttons (drawn by the window, not part of the form).
+pub const UPDATES_KEY: &str = "general.check_updates";
+
+/// Index of the "Updates" page in [`SECTIONS`].
+pub fn updates_section() -> usize {
+    SECTIONS
+        .iter()
+        .position(|s| s.fields.iter().any(|f| f.path == UPDATES_KEY))
+        .unwrap_or(0)
+}
 
 /// Every field in display order (the index used by [`Input`] lists).
 pub fn fields() -> impl Iterator<Item = &'static Field> {
@@ -1282,6 +1309,13 @@ mod tests {
         assert_eq!(std::fs::read_dir(p.parent().unwrap()).unwrap().count(), 1);
         std::fs::write(&p, "[taskbar]\nheigth = 3\n").unwrap();
         assert!(load(&p).is_err());
+    }
+
+    #[test]
+    fn updates_page_exists() {
+        let i = updates_section();
+        assert_eq!(SECTIONS[i].title.en, "Updates");
+        assert_eq!(SECTIONS[i].fields.len(), 1);
     }
 
     #[test]

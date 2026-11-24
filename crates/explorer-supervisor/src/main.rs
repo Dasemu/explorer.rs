@@ -11,7 +11,9 @@
 //!   `explorer_core::supervisor`; reloads the config file when it changes;
 //!   in shell mode runs the startup apps once per sign-in.
 //! - `--settings`: the settings window (native Win32 controls, see
-//!   `settings_ui`); edits the config file in place.
+//!   `settings_ui`); edits the config file in place. `--updates` opens it
+//!   on the Updates page; `--update-now` also installs the latest release
+//!   (the taskbar's update reminder runs that).
 //! - `--restore-explorer`, `--edit-config`, `--status`: one-shot commands.
 //!
 //! Safety rule: without an explicit mode or command the program only prints
@@ -77,6 +79,13 @@ pub struct Args {
     /// the default on the first save).
     #[arg(long, conflicts_with_all = ["dev", "shell", "supervise", "status", "resume"])]
     pub settings: bool,
+    /// With --settings: open the Updates page.
+    #[arg(long, requires = "settings", conflicts_with_all = ["dev", "shell", "supervise", "resume"])]
+    pub updates: bool,
+    /// With --settings: open the Updates page and install the latest
+    /// release right away (used by the taskbar's update reminder).
+    #[arg(long, requires = "settings", conflicts_with_all = ["dev", "shell", "supervise", "resume"])]
+    pub update_now: bool,
     /// Ask the running explorer.rs to restart all its components (same as
     /// Ctrl+Alt+Shift+R).
     #[arg(long, conflicts_with_all = ["dev", "shell", "supervise", "restore_explorer", "edit_config", "settings", "status", "resume"])]
@@ -107,7 +116,14 @@ fn main() {
         std::process::exit(cli::edit_config(args.config.as_deref()));
     }
     if args.settings {
-        std::process::exit(cli::settings(args.config.as_deref()));
+        let page = if args.update_now {
+            cli::SettingsPage::UpdateNow
+        } else if args.updates {
+            cli::SettingsPage::Updates
+        } else {
+            cli::SettingsPage::Normal
+        };
+        std::process::exit(cli::settings(args.config.as_deref(), page));
     }
     if args.status {
         std::process::exit(cli::status(args.config.as_deref(), args.output.as_deref()));
@@ -161,6 +177,10 @@ mod tests {
                 .unwrap()
                 .settings
         );
+        let a = Args::try_parse_from(["explorer-rs", "--settings", "--update-now"]).unwrap();
+        assert!(a.settings && a.update_now);
+        assert!(Args::try_parse_from(["explorer-rs", "--update-now"]).is_err());
+        assert!(Args::try_parse_from(["explorer-rs", "--updates", "--dev"]).is_err());
         for other in ["--dev", "--shell", "--edit-config", "--status", "--restart"] {
             assert!(Args::try_parse_from(["explorer-rs", "--settings", other]).is_err());
         }

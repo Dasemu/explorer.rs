@@ -27,6 +27,8 @@ pub mod dpi;
 #[cfg(windows)]
 pub mod gfx;
 #[cfg(windows)]
+pub mod http;
+#[cfg(windows)]
 pub mod icons;
 #[cfg(windows)]
 pub mod ipc;
@@ -68,6 +70,8 @@ pub mod thumbnails;
 pub mod time;
 #[cfg(windows)]
 pub mod tooltip;
+#[cfg(windows)]
+pub mod update;
 #[cfg(windows)]
 pub mod util;
 #[cfg(windows)]

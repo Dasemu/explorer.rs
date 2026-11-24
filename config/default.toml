@@ -22,6 +22,11 @@ language = "system"
 # "Animation effects" setting (Accessibility > Visual effects) also
 # turns them off.
 animations = true
+# Check GitHub once a day for a new explorer.rs release and, while one is
+# available, show a small reminder next to the clock every few days.
+# Nothing is ever installed without asking: updating is a button
+# (in the reminder or in Settings > Updates). false = never check.
+check_updates = true
 
 [taskbar]
 # Screen edge: "bottom" or "top".
