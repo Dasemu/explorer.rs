@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Link the C runtime statically into every MSVC binary (docs/decisions/
+# 0015-static-crt.md). Without this the .exe files import VCRUNTIME140.dll,
+# which a clean Windows 11 does not ship, and they fail to start.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
