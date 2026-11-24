@@ -376,7 +376,7 @@ impl Wizard {
         self.body = make(p, w!("STATIC"), "", st, none, 0);
         self.ctls.push(Ctl {
             hwnd: self.body,
-            pages: &[Page::Welcome, Page::Confirm, Page::Done],
+            pages: &[Page::Welcome, Page::Confirm],
             role: Role::Text,
             title: false,
         });
@@ -439,10 +439,13 @@ impl Wizard {
         ];
         for (i, (rid, lid, label, desc, role)) in modes.into_iter().enumerate() {
             let group = if i == 0 { WS_GROUP } else { WINDOW_STYLE(0) };
+            // The glyph button carries no text: the label is the STATIC next
+            // to it. With text, its first letter showed through at the right
+            // edge of the (GLYPH wide) button, next to the circle.
             self.radios[i] = make(
                 p,
                 w!("BUTTON"),
-                label,
+                "",
                 WINDOW_STYLE(BS_AUTORADIOBUTTON as u32) | WS_TABSTOP | group,
                 none,
                 rid,
@@ -471,7 +474,7 @@ impl Wizard {
         }
         let check = WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP | WS_GROUP;
         let search_label = s("Fast file search", "Búsqueda rápida de archivos");
-        self.c_search = make(p, w!("BUTTON"), search_label, check, none, ID_C_SEARCH);
+        self.c_search = make(p, w!("BUTTON"), "", check, none, ID_C_SEARCH);
         self.l_search = make(
             p,
             w!("STATIC"),
@@ -492,7 +495,7 @@ impl Wizard {
             0,
         );
         let launch_label = s("Start explorer.rs now", "Iniciar explorer.rs ahora");
-        self.c_launch = make(p, w!("BUTTON"), launch_label, check, none, ID_C_LAUNCH);
+        self.c_launch = make(p, w!("BUTTON"), "", check, none, ID_C_LAUNCH);
         self.l_launch = make(
             p,
             w!("STATIC"),
@@ -563,7 +566,7 @@ impl Wizard {
             "Also remove my settings and logs",
             "Eliminar también mi configuración y mis registros",
         );
-        self.c_data = make(p, w!("BUTTON"), data_label, check, none, ID_C_DATA);
+        self.c_data = make(p, w!("BUTTON"), "", check, none, ID_C_DATA);
         self.l_data = make(
             p,
             w!("STATIC"),
@@ -1482,6 +1485,13 @@ fn run(kind: Kind) -> i32 {
     let _ = unsafe { PostMessageW(Some(hwnd), WM_APP_INIT, WPARAM(0), LPARAM(0)) };
     // SAFETY: our own window.
     let _ = unsafe { ShowWindow(hwnd, SW_SHOW) };
+    // Setup is started by another process (the browser, Explorer, an update
+    // from explorer.rs) and, being elevated, often loses the foreground
+    // lock: the window opened behind the others and looked hung. Send the
+    // inert key first so we are the last input sender (LESSONS.md,
+    // AllowSetForegroundWindow), then take the foreground.
+    explorer_win::keyboard::claim_foreground_rights();
+    explorer_win::activate::force_foreground(hwnd);
     let code = window::run_message_loop(|msg| {
         // SAFETY: msg came from GetMessageW; hwnd is our window.
         unsafe { IsDialogMessageW(hwnd, msg) }.as_bool()
