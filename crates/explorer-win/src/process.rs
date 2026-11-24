@@ -84,7 +84,7 @@ pub fn window_pid(hwnd: HWND) -> u32 {
     pid
 }
 
-fn image_of_window(hwnd: HWND) -> Option<String> {
+pub(crate) fn image_of_window(hwnd: HWND) -> Option<String> {
     let pid = window_pid(hwnd);
     if pid == 0 {
         return None;
