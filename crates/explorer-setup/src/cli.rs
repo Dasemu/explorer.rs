@@ -71,7 +71,7 @@ explorer-rs-setup.exe [options]
 Install (default):
   --silent                  no user interface; use defaults or previous choices
   --mode=alongside|shell|none
-                            start mode (default: shell, or the previous choice)
+                            start mode (default: alongside, or the previous choice)
   --file-search=on|off      fast file search helper (default: on, or previous)
   --no-launch               do not start explorer.rs at the end
 

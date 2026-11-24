@@ -417,8 +417,8 @@ impl Wizard {
                 ID_R_SHELL,
                 ID_L_SHELL,
                 s(
-                    "Replace Windows Explorer as my shell (recommended)",
-                    "Reemplazar el Explorador de Windows como mi shell (recomendado)",
+                    "Replace Windows Explorer as my shell",
+                    "Reemplazar el Explorador de Windows como mi shell",
                 ),
                 s(
                     "Windows Explorer will no longer start when you sign in. To get it back, press Ctrl+Alt+Shift+E or run \"Restore Windows Explorer\" from the Start menu.",

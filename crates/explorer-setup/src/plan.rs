@@ -43,11 +43,12 @@ pub const SETTINGS_ARGS: &str = "--settings";
 /// How explorer.rs starts after sign-in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StartMode {
-    /// HKU\<sid>\...\Run value: `explorer-rs.exe --dev` next to explorer.exe.
-    Alongside,
-    /// Per-user Winlogon Shell = `explorer-rs.exe --shell` (the default:
-    /// explorer.rs replaces Windows Explorer's taskbar, Start and desktop).
+    /// HKU\<sid>\...\Run value: `explorer-rs.exe --dev` next to explorer.exe
+    /// (the default: nothing in Windows is replaced).
     #[default]
+    Alongside,
+    /// Per-user Winlogon Shell = `explorer-rs.exe --shell` (opt-in:
+    /// explorer.rs replaces Windows Explorer's taskbar, Start and desktop).
     Shell,
     /// Installed only; started by hand from the Start menu.
     None,
@@ -89,7 +90,7 @@ pub struct PreviousInstall {
 }
 
 /// Initial choices: command line, else previous install, else defaults
-/// (replace the shell, fast file search on, start now).
+/// (run alongside Windows Explorer, fast file search on, start now).
 pub fn initial_choices(prev: Option<&PreviousInstall>, args: &crate::cli::InstallArgs) -> Choices {
     Choices {
         mode: args
@@ -848,7 +849,7 @@ mod tests {
         assert_eq!(
             initial_choices(None, &none),
             Choices {
-                mode: StartMode::Shell,
+                mode: StartMode::Alongside,
                 file_search: true,
                 launch: true
             }
