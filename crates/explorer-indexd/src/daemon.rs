@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -43,6 +43,8 @@ pub struct Daemon {
     started: Instant,
     last_save: Mutex<Option<Instant>>,
     saved_generation: AtomicU64,
+    /// Set when a source finishes a scan; cleared when a snapshot is taken.
+    settled_unsaved: AtomicBool,
     snapshot_path: PathBuf,
     /// Volumes that fell back to walking because the elevated helper was
     /// not reachable; retried periodically ([`Daemon::retry_helper`]).
@@ -51,6 +53,51 @@ pub struct Daemon {
 
 /// How often roots waiting for the elevated helper are retried.
 pub const HELPER_RETRY: Duration = Duration::from_secs(60);
+
+/// Minimum time between two *early* snapshots (see [`snapshot_due`]), so that
+/// several roots finishing their scans one after another do not each trigger
+/// a full encode.
+pub const EARLY_SNAPSHOT_MIN_GAP: Duration = Duration::from_secs(30);
+
+/// How often the main loop evaluates [`snapshot_due`].
+pub const SNAPSHOT_CHECK: Duration = Duration::from_secs(5);
+
+/// Facts the snapshot policy decides on (all gathered by the daemon).
+#[derive(Debug, Clone, Copy)]
+pub struct SnapshotCheck {
+    /// The index changed since the last saved snapshot.
+    pub changed: bool,
+    /// Some root is still starting or scanning.
+    pub scanning: bool,
+    /// A root finished a scan (became live/polling) since the last save.
+    pub settled_unsaved: bool,
+    /// Time since the last snapshot written by this process, if any.
+    pub since_last_save: Option<Duration>,
+    /// Time since the daemon started.
+    pub uptime: Duration,
+    /// `snapshot_interval_s`; zero disables periodic and early snapshots
+    /// (the one on clean shutdown remains).
+    pub interval: Duration,
+}
+
+/// Whether a snapshot should be written now.
+///
+/// Besides the periodic snapshot, one is written soon after a scan completes:
+/// a full scan is the expensive part of a restart (seconds for a few hundred
+/// thousand entries), and without this the first snapshot would only appear
+/// one whole interval after start, so a daemon killed or crashed before then
+/// (logoff, update, supervisor restart) rebuilds the index from scratch.
+pub fn snapshot_due(c: SnapshotCheck) -> bool {
+    if !c.changed || c.interval.is_zero() {
+        return false;
+    }
+    let periodic = c.since_last_save.unwrap_or(c.uptime) >= c.interval;
+    let early = c.settled_unsaved
+        && !c.scanning
+        && c.since_last_save
+            .is_none_or(|t| t >= EARLY_SNAPSHOT_MIN_GAP);
+    periodic || early
+}
 
 /// Roots (path) whose volume is waiting for the helper, in root order.
 pub fn roots_waiting_for_helper(
@@ -113,6 +160,9 @@ impl ChangeSink for Daemon {
 
     fn set_state(&self, vol: VolId, state: SourceState) {
         tracing::debug!(vol, state = %state.label(), "source state");
+        if matches!(state, SourceState::Live | SourceState::Polling) {
+            self.settled_unsaved.store(true, Ordering::Relaxed);
+        }
         lock(&self.states).insert(vol, state);
     }
 }
@@ -152,6 +202,7 @@ impl Daemon {
             started: Instant::now(),
             last_save: Mutex::new(None),
             saved_generation: AtomicU64::new(generation),
+            settled_unsaved: AtomicBool::new(false),
             snapshot_path,
             helper_missing: Mutex::new(HashSet::new()),
         })
@@ -416,6 +467,26 @@ impl Daemon {
         false
     }
 
+    /// Write a snapshot if [`snapshot_due`] says so.
+    pub fn save_snapshot_if_due(&self) -> std::io::Result<bool> {
+        let scanning = lock(&self.states)
+            .values()
+            .any(|s| matches!(s, SourceState::Scanning | SourceState::Starting));
+        let due = snapshot_due(SnapshotCheck {
+            changed: self.read().generation() != self.saved_generation.load(Ordering::Relaxed),
+            scanning,
+            settled_unsaved: self.settled_unsaved.load(Ordering::Relaxed),
+            since_last_save: lock(&self.last_save).map(|t| t.elapsed()),
+            uptime: self.started.elapsed(),
+            interval: Duration::from_secs(self.cfg.snapshot_interval_s),
+        });
+        if due {
+            self.save_snapshot(false)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Write a snapshot if the index changed since the last one (or always
     /// with `force`). Encoding happens under the read lock, I/O without it.
     pub fn save_snapshot(&self, force: bool) -> std::io::Result<bool> {
@@ -425,10 +496,16 @@ impl Daemon {
             if !force && g == self.saved_generation.load(Ordering::Relaxed) {
                 return Ok(false);
             }
+            // Cleared under the read lock: a scan that finishes after this
+            // point sets it again and gets its own snapshot.
+            self.settled_unsaved.store(false, Ordering::Relaxed);
             (g, snapshot::encode(&ix))
         };
         let t0 = Instant::now();
-        snapshot::write_atomic(&self.snapshot_path, &bytes)?;
+        if let Err(e) = snapshot::write_atomic(&self.snapshot_path, &bytes) {
+            self.settled_unsaved.store(true, Ordering::Relaxed);
+            return Err(e);
+        }
         self.saved_generation.store(generation, Ordering::Relaxed);
         *lock(&self.last_save) = Some(Instant::now());
         tracing::info!(
@@ -514,6 +591,112 @@ mod tests {
         let roots = vec![(1, "C:\\".to_string()), (2, "D:\\".to_string())];
         assert_eq!(roots_waiting_for_helper(&missing, &roots), ["D:\\"]);
         assert!(roots_waiting_for_helper(&HashSet::new(), &roots).is_empty());
+    }
+
+    fn check() -> SnapshotCheck {
+        SnapshotCheck {
+            changed: true,
+            scanning: false,
+            settled_unsaved: false,
+            since_last_save: None,
+            uptime: Duration::from_secs(10),
+            interval: Duration::from_secs(600),
+        }
+    }
+
+    #[test]
+    fn snapshot_policy() {
+        // Nothing changed: never.
+        let c = SnapshotCheck {
+            changed: false,
+            settled_unsaved: true,
+            uptime: Duration::from_secs(9999),
+            ..check()
+        };
+        assert!(!snapshot_due(c));
+        // Disabled by configuration.
+        let c = SnapshotCheck {
+            interval: Duration::ZERO,
+            settled_unsaved: true,
+            ..check()
+        };
+        assert!(!snapshot_due(c));
+        // Mid-scan, young daemon: wait.
+        let c = SnapshotCheck {
+            scanning: true,
+            settled_unsaved: true,
+            ..check()
+        };
+        assert!(!snapshot_due(c));
+        // Scan just finished and nothing was saved yet: save now, long
+        // before the first periodic snapshot.
+        let c = SnapshotCheck {
+            settled_unsaved: true,
+            ..check()
+        };
+        assert!(snapshot_due(c));
+        // Changes but no completed scan and the interval has not elapsed.
+        assert!(!snapshot_due(check()));
+        // A second root settling right after a save waits for the min gap.
+        let c = SnapshotCheck {
+            settled_unsaved: true,
+            since_last_save: Some(Duration::from_secs(5)),
+            ..check()
+        };
+        assert!(!snapshot_due(c));
+        let c = SnapshotCheck {
+            since_last_save: Some(EARLY_SNAPSHOT_MIN_GAP),
+            ..c
+        };
+        assert!(snapshot_due(c));
+        // Periodic: measured from the last save, or from start if none.
+        let c = SnapshotCheck {
+            uptime: Duration::from_secs(600),
+            ..check()
+        };
+        assert!(snapshot_due(c));
+        let c = SnapshotCheck {
+            since_last_save: Some(Duration::from_secs(599)),
+            uptime: Duration::from_secs(5000),
+            ..check()
+        };
+        assert!(!snapshot_due(c));
+        // Periodic applies even while a source is scanning (as before).
+        let c = SnapshotCheck {
+            scanning: true,
+            since_last_save: Some(Duration::from_secs(600)),
+            ..check()
+        };
+        assert!(snapshot_due(c));
+    }
+
+    #[test]
+    fn snapshot_written_after_first_scan_without_shutdown() {
+        let d = tempfile::tempdir().unwrap();
+        let data = d.path().join("data");
+        std::fs::create_dir_all(data.join("sub")).unwrap();
+        std::fs::write(data.join("sub/a.txt"), "x").unwrap();
+        let snap = d.path().join("state/index.snapshot");
+        let cfg = IndexConfig {
+            rescan_interval_s: 0,
+            ..Default::default()
+        };
+        let dm = Daemon::new(cfg.clone(), snap.clone());
+        dm.start_roots(&[data.to_string_lossy().to_string()]);
+        for _ in 0..500 {
+            if dm.status().roots[0].state == "polling" {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(dm.save_snapshot_if_due().unwrap(), "early snapshot due");
+        assert!(snap.exists());
+        assert!(!dm.save_snapshot_if_due().unwrap(), "nothing new to save");
+        // The daemon "dies" here without shutdown(): a restart still finds
+        // the scanned entries instead of rebuilding from scratch.
+        let dm2 = Daemon::new(cfg, snap);
+        assert_eq!(dm2.read().len(), 3);
+        dm.shutdown();
     }
 
     #[test]
