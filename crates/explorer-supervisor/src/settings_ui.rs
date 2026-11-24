@@ -16,6 +16,16 @@
 //! Check boxes are glyph-only controls next to a clickable label, because
 //! themed buttons ignore WM_CTLCOLORSTATIC text colours.
 //!
+//! The Updates page adds, below its one setting, the update status and
+//! buttons (check now, update now, release page). Network work runs on
+//! worker threads (`explorer_win::update`) that report through a channel
+//! and `WM_APP_UPD`. "Update now" downloads and verifies the installer,
+//! starts it elevated with `--silent`, and closes this window at once: the
+//! installer stops and replaces every explorer-rs*.exe, this one included.
+//! This process is never in the supervisor's job (it is started by the
+//! user, the Start menu or the taskbar, whose children break away), so
+//! stopping explorer.rs does not take the installer down with it.
+//!
 //! Saving never restarts anything by itself: the running supervisor
 //! already watches the config file and restarts the components whose
 //! settings changed. "Save and restart" additionally asks the guardian for
@@ -23,10 +33,13 @@
 //! everything again, so the user is never left without a shell).
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 
 use explorer_core::config::{ThemeMode, DEFAULT_CONFIG_TOML};
 use explorer_core::i18n::{tr, trf, Lang};
+use explorer_core::update::{self as up, Release, UpdateState, Version};
 use explorer_supervisor::settings::{self, Input, Kind, Loaded, SECTIONS};
+use explorer_win::update::{RunError, VerifiedSetup};
 use explorer_win::util::WideString;
 use explorer_win::window::{self, CreateParams, Handler};
 use explorer_win::windows::core::{w, BOOL, PCWSTR};
@@ -75,6 +88,12 @@ const PANEL_CLASS: &str = "ExplorerRs.SettingsPanel";
 /// Single-instance mutex: a second `--settings` brings the first to front.
 const MUTEX: &str = "ExplorerRs.Settings";
 const WM_APP_INIT: u32 = WM_APP + 1;
+/// A worker thread of the Updates page queued an [`UpdMsg`].
+const WM_APP_UPD: u32 = WM_APP + 2;
+/// Start updating right away (`--update-now`), once the window is up.
+const WM_APP_UPDATE_NOW: u32 = WM_APP + 3;
+/// Show the Updates page (`--updates` while the window is already open).
+const WM_APP_SHOW_UPDATES: u32 = WM_APP + 4;
 
 const SS_LEFT: u32 = 0x0;
 const SS_NOPREFIX: u32 = 0x80;
@@ -87,6 +106,11 @@ const ID_SAVE: u16 = 12;
 const ID_SAVE_RESTART: u16 = 13;
 /// IDCANCEL, so Esc (IsDialogMessage) closes the window.
 const ID_CLOSE: u16 = IDCANCEL.0 as u16;
+// Buttons of the Updates page (children of the panel).
+const ID_UPD_CHECK: u16 = 20;
+const ID_UPD_INSTALL: u16 = 21;
+const ID_UPD_PAGE: u16 = 22;
+const ID_UPD_FOLDER: u16 = 23;
 const FIELD_BASE: u16 = 1000;
 const FIELD_STRIDE: u16 = 16;
 const SUB_CTL: u16 = 0;
@@ -188,6 +212,54 @@ enum Role {
     Sub,
     Edit,
     Side,
+    /// Push button on the panel (not in the bottom bar).
+    PanelButton,
+}
+
+/// How the window opens (`--settings`, `--updates`, `--update-now`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Start {
+    Normal,
+    Updates,
+    UpdateNow,
+}
+
+/// Results of the Updates page's worker threads.
+enum UpdMsg {
+    Checked(UpdateState, Result<Release, String>),
+    Progress(u64, Option<u64>),
+    Downloaded(Result<(Release, VerifiedSetup), String>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Busy {
+    Idle,
+    Checking,
+    Downloading,
+}
+
+/// The Updates page: what is shown below its one form field.
+struct UpdatesUi {
+    section: usize,
+    status: HWND,
+    check: HWND,
+    install: HWND,
+    info: HWND,
+    page_btn: HWND,
+    folder_btn: HWND,
+    state: UpdateState,
+    state_file: PathBuf,
+    downloads: PathBuf,
+    /// The release of the last "Check now" (with its download links).
+    release: Option<Release>,
+    busy: Busy,
+    progress: Option<(u64, Option<u64>)>,
+    /// Shown instead of the regular status line (e.g. an error).
+    note: Option<String>,
+    /// Offer the downloaded installer's folder (starting it failed).
+    show_folder: bool,
+    tx: mpsc::Sender<UpdMsg>,
+    rx: mpsc::Receiver<UpdMsg>,
 }
 
 /// The controls of one field.
@@ -221,6 +293,8 @@ struct Settings {
     section: usize,
     scroll: i32,
     content_h: i32,
+    upd: UpdatesUi,
+    start: Start,
 }
 
 fn hmenu(id: u16) -> Option<HMENU> {
@@ -527,6 +601,32 @@ impl Settings {
             theme(self.buttons[k], w!("DarkMode_Explorer"));
         }
 
+        // Updates page: status, buttons and release notes below its field.
+        self.upd.status = make(p, w!("STATIC"), "", st | WS_VISIBLE, none, 0);
+        self.upd.info = make(p, w!("STATIC"), "", st | WS_VISIBLE, none, 0);
+        let upd_buttons = [
+            (ID_UPD_CHECK, self.s("Check now", "Buscar ahora")),
+            (ID_UPD_INSTALL, self.s("Update now", "Actualizar ahora")),
+            (
+                ID_UPD_PAGE,
+                self.s("Open the release page", "Abrir la página de la versión"),
+            ),
+            (
+                ID_UPD_FOLDER,
+                self.s("Open the download folder", "Abrir la carpeta de descarga"),
+            ),
+        ];
+        for (id, text) in upd_buttons {
+            let h = make(p, w!("BUTTON"), text, push, none, id);
+            theme(h, w!("DarkMode_Explorer"));
+            match id {
+                ID_UPD_CHECK => self.upd.check = h,
+                ID_UPD_INSTALL => self.upd.install = h,
+                ID_UPD_PAGE => self.upd.page_btn = h,
+                _ => self.upd.folder_btn = h,
+            }
+        }
+
         let roles = self.roles();
         PAINT.with(|p| {
             if let Some(p) = p.borrow_mut().as_mut() {
@@ -537,7 +637,13 @@ impl Settings {
     }
 
     fn roles(&self) -> Vec<(isize, Role)> {
-        let mut v = vec![(self.list.0 as isize, Role::Side)];
+        let mut v = vec![
+            (self.list.0 as isize, Role::Side),
+            (self.upd.info.0 as isize, Role::Sub),
+        ];
+        for b in self.upd.buttons() {
+            v.push((b.0 as isize, Role::PanelButton));
+        }
         for r in &self.rows {
             v.push((r.help.0 as isize, Role::Sub));
             if matches!(r.field.kind, Kind::Int { .. } | Kind::Text | Kind::List) {
@@ -575,8 +681,9 @@ impl Settings {
         unsafe {
             let font = CreateFontIndirectW(&lf);
             let title_font = CreateFontIndirectW(&tf);
-            let mut all = vec![self.list];
+            let mut all = vec![self.list, self.upd.status, self.upd.info];
             all.extend(self.buttons);
+            all.extend(self.upd.buttons());
             for r in &self.rows {
                 all.extend([r.label, r.ctl, r.help]);
                 for (g, l) in &r.flags {
@@ -813,6 +920,9 @@ impl Settings {
             }
             y += self.px(18);
         }
+        if self.section == self.upd.section {
+            y = self.layout_updates(hdc, y, m, cw);
+        }
         // SAFETY: restoring the DC's font and releasing the DC.
         unsafe {
             SelectObject(hdc, old);
@@ -964,6 +1074,7 @@ impl Settings {
                 show(*l, on);
             }
         }
+        self.refresh_updates();
         // Back to the top. Placing the controls with scroll = 0 is enough:
         // `layout_panel` positions them absolutely.
         self.scroll = 0;
@@ -1028,6 +1139,10 @@ impl Settings {
                 self.save(true);
             }
             ID_CLOSE => self.close(),
+            ID_UPD_CHECK => self.check_now(),
+            ID_UPD_INSTALL => self.update_now(),
+            ID_UPD_PAGE => self.open_release_page(),
+            ID_UPD_FOLDER => self.open_download_folder(),
             id if id >= FIELD_BASE => {
                 let i = ((id - FIELD_BASE) / FIELD_STRIDE) as usize;
                 let sub = (id - FIELD_BASE) % FIELD_STRIDE;
@@ -1216,21 +1331,425 @@ impl Settings {
         true
     }
 
+    /// Unsaved changes: ask to save them. False = the user cancelled (or
+    /// saving failed), so whatever was about to happen must not.
+    fn settle_unsaved(&mut self) -> bool {
+        if !self.dirty() {
+            return true;
+        }
+        let q = self.s("Save your changes?", "¿Guardar los cambios?");
+        match message_box(Some(self.hwnd), q, MB_YESNOCANCEL | MB_ICONQUESTION) {
+            r if r == IDYES.0 => self.save(false),
+            r if r == IDNO.0 => true,
+            _ => false,
+        }
+    }
+
     fn close(&mut self) {
-        if self.dirty() {
-            let q = self.s("Save your changes?", "¿Guardar los cambios?");
-            match message_box(Some(self.hwnd), q, MB_YESNOCANCEL | MB_ICONQUESTION) {
-                r if r == IDYES.0 => {
-                    if !self.save(false) {
-                        return;
-                    }
-                }
-                r if r == IDNO.0 => {}
-                _ => return,
-            }
+        if !self.settle_unsaved() {
+            return;
         }
         // SAFETY: our own window.
         let _ = unsafe { DestroyWindow(self.hwnd) };
+    }
+}
+
+impl UpdatesUi {
+    fn new() -> Self {
+        let paths = explorer_core::paths::AppPaths::from_env();
+        let state_file = paths.update_state_file();
+        let (tx, rx) = mpsc::channel();
+        Self {
+            section: settings::updates_section(),
+            status: HWND::default(),
+            check: HWND::default(),
+            install: HWND::default(),
+            info: HWND::default(),
+            page_btn: HWND::default(),
+            folder_btn: HWND::default(),
+            state: UpdateState::load(&state_file),
+            state_file,
+            downloads: paths.updates_dir(),
+            release: None,
+            busy: Busy::Idle,
+            progress: None,
+            note: None,
+            show_folder: false,
+            tx,
+            rx,
+        }
+    }
+
+    fn buttons(&self) -> [HWND; 4] {
+        [self.check, self.install, self.page_btn, self.folder_btn]
+    }
+
+    /// The newer version on offer and its notes, if any: from the last
+    /// "Check now", else from the last check recorded in the state file.
+    fn available(&self) -> Option<(Version, String)> {
+        let cur = Version::current();
+        match &self.release {
+            Some(r) => (r.version > cur).then(|| (r.version, r.notes.clone())),
+            None => self.state.available(cur).map(|(k, v)| (v, k.notes.clone())),
+        }
+    }
+}
+
+/// Wake the window to read the Updates page's channel.
+fn post_upd(hwnd: isize) {
+    // SAFETY: posting to a window of this process (gone = harmless error).
+    let _ = unsafe {
+        PostMessageW(
+            Some(HWND(hwnd as *mut core::ffi::c_void)),
+            WM_APP_UPD,
+            WPARAM(0),
+            LPARAM(0),
+        )
+    };
+}
+
+fn megabytes(b: u64) -> String {
+    format!("{:.1} MB", b as f64 / (1024.0 * 1024.0))
+}
+
+impl Settings {
+    /// Texts, visibility and enabled state of the Updates page's controls.
+    fn refresh_updates(&mut self) {
+        use explorer_win::windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
+        let lang = self.lang;
+        let u = &self.upd;
+        let on_page = self.section == u.section;
+        let cur = Version::current();
+        let now = up::unix_now();
+        let avail = u.available();
+        let line2 = match u.busy {
+            Busy::Checking => tr(lang, "Checking for updates…", "Buscando actualizaciones…").into(),
+            Busy::Downloading => {
+                let v = avail.as_ref().map(|a| a.0.to_string()).unwrap_or_default();
+                match u.progress {
+                    Some((n, Some(t))) if t > 0 => trf(
+                        lang,
+                        format!("Downloading version {v}… {}%", n * 100 / t),
+                        format!("Descargando la versión {v}… {}%", n * 100 / t),
+                    ),
+                    Some((n, None)) => trf(
+                        lang,
+                        format!("Downloading version {v}… {}", megabytes(n)),
+                        format!("Descargando la versión {v}… {}", megabytes(n)),
+                    ),
+                    _ => trf(
+                        lang,
+                        format!("Downloading version {v}…"),
+                        format!("Descargando la versión {v}…"),
+                    ),
+                }
+            }
+            Busy::Idle => match (&u.note, u.state.last_check) {
+                (Some(n), _) => n.clone(),
+                (None, None) => tr(lang, "Not checked yet.", "Aún no se ha comprobado.").into(),
+                (None, Some(t)) => {
+                    let when = up::ago(lang, t, now);
+                    match (&u.state.last_error, &avail) {
+                        (Some(e), _) if u.state.last_success != Some(t) => trf(
+                            lang,
+                            format!("The last check failed ({when}): {e}"),
+                            format!("La última comprobación falló ({when}): {e}"),
+                        ),
+                        (_, Some((v, _))) => trf(
+                            lang,
+                            format!("Last checked {when}: version {v} is available."),
+                            format!("Última comprobación {when}: está disponible la versión {v}."),
+                        ),
+                        _ => trf(
+                            lang,
+                            format!("Last checked {when}: you have the latest version."),
+                            format!("Última comprobación {when}: tienes la última versión."),
+                        ),
+                    }
+                }
+            },
+        };
+        let status = trf(
+            lang,
+            format!("Installed version: {cur}\n{line2}"),
+            format!("Versión instalada: {cur}\n{line2}"),
+        );
+        set_text(u.status, &status);
+        let info = avail.as_ref().map(|(v, notes)| {
+            let mut t = trf(
+                lang,
+                format!("explorer.rs {v} is available. It includes fixes and improvements; installing it is recommended."),
+                format!("explorer.rs {v} está disponible. Incluye correcciones y mejoras; se recomienda instalarla."),
+            );
+            if !notes.is_empty() {
+                t.push_str(tr(lang, "\n\nWhat's new:\n", "\n\nNovedades:\n"));
+                t.push_str(notes);
+            }
+            t.push_str(tr(
+                lang,
+                "\n\n\"Update now\" downloads the installer, checks it, and runs it after Windows asks for administrator permission. explorer.rs closes for a moment and comes back; your settings and how explorer.rs starts are kept.",
+                "\n\n\"Actualizar ahora\" descarga el instalador, lo comprueba y lo ejecuta después de que Windows pida permiso de administrador. explorer.rs se cierra un momento y vuelve; tu configuración y la forma en que se inicia explorer.rs se conservan.",
+            ));
+            t
+        });
+        set_text(u.info, info.as_deref().unwrap_or(""));
+        let idle = u.busy == Busy::Idle;
+        show(u.status, on_page);
+        show(u.check, on_page);
+        show(u.install, on_page && avail.is_some());
+        show(u.info, on_page && info.is_some());
+        show(
+            u.page_btn,
+            on_page && (avail.is_some() || u.note.is_some() || u.state.last_error.is_some()),
+        );
+        show(u.folder_btn, on_page && u.show_folder);
+        // SAFETY: valid windows.
+        unsafe {
+            let _ = EnableWindow(u.check, idle);
+            let _ = EnableWindow(u.install, idle);
+        }
+    }
+
+    /// Place the Updates page's extra controls from `y`; returns the new y.
+    fn layout_updates(&self, hdc: HDC, mut y: i32, m: i32, cw: i32) -> i32 {
+        let u = &self.upd;
+        let gap = self.px(8);
+        let bh = self.px(30);
+        let status_h = self.text_height(hdc, &get_text(u.status), cw);
+        self.place(u.status, m, y - self.scroll, cw, status_h + self.px(2));
+        y += status_h + self.px(12);
+        let bw = self.px(170);
+        self.place(u.check, m, y - self.scroll, bw, bh);
+        self.place(u.install, m + bw + gap, y - self.scroll, bw, bh);
+        y += bh + self.px(16);
+        let info = get_text(u.info);
+        if !info.is_empty() {
+            let h = self.text_height(hdc, &info, cw);
+            self.place(u.info, m, y - self.scroll, cw, h + self.px(2));
+            y += h + self.px(16);
+        }
+        let wide = self.px(250);
+        self.place(u.page_btn, m, y - self.scroll, wide, bh);
+        self.place(u.folder_btn, m + wide + gap, y - self.scroll, wide, bh);
+        y + bh + self.px(18)
+    }
+
+    /// Re-show the Updates page after its state changed.
+    fn updates_changed(&mut self) {
+        self.refresh_updates();
+        if self.section == self.upd.section {
+            self.layout_panel();
+            // SAFETY: valid window.
+            let _ = unsafe {
+                explorer_win::windows::Win32::Graphics::Gdi::InvalidateRect(
+                    Some(self.panel),
+                    None,
+                    true,
+                )
+            };
+        }
+    }
+
+    /// The taskbar may have checked meanwhile.
+    fn reload_update_state(&mut self) {
+        if self.upd.busy == Busy::Idle {
+            self.upd.state = UpdateState::load(&self.upd.state_file);
+            self.updates_changed();
+        }
+    }
+
+    fn check_now(&mut self) {
+        if self.upd.busy != Busy::Idle {
+            return;
+        }
+        self.upd.busy = Busy::Checking;
+        self.upd.note = None;
+        self.updates_changed();
+        let tx = self.upd.tx.clone();
+        let hwnd = self.hwnd.0 as isize;
+        let file = self.upd.state_file.clone();
+        std::thread::spawn(move || {
+            let (state, result) = explorer_win::update::check_and_record(&file);
+            let _ = tx.send(UpdMsg::Checked(state, result));
+            post_upd(hwnd);
+        });
+    }
+
+    /// Download, verify and start the installer of the latest release.
+    fn update_now(&mut self) {
+        if self.upd.busy != Busy::Idle {
+            return;
+        }
+        if !explorer_win::update::running_installed_copy() {
+            // The installer would install a second copy (by default as the
+            // shell) instead of updating this one.
+            let q = self.s(
+                "This copy of explorer.rs was not installed with its installer (for example, it runs from the portable zip), so it cannot update itself.\n\nOpen the download page?",
+                "Esta copia de explorer.rs no se instaló con su instalador (por ejemplo, se ejecuta desde el zip portable), así que no puede actualizarse sola.\n\n¿Abrir la página de descarga?",
+            );
+            if message_box(Some(self.hwnd), q, MB_YESNO | MB_ICONINFORMATION) == IDYES.0 {
+                self.open_release_page();
+            }
+            return;
+        }
+        // The window closes when the installer starts.
+        if !self.settle_unsaved() {
+            return;
+        }
+        self.upd.busy = Busy::Downloading;
+        self.upd.progress = None;
+        self.upd.note = None;
+        self.upd.show_folder = false;
+        self.updates_changed();
+        let tx = self.upd.tx.clone();
+        let hwnd = self.hwnd.0 as isize;
+        let known = self.upd.release.clone();
+        let dir = self.upd.downloads.clone();
+        let lang = self.lang;
+        std::thread::spawn(move || {
+            let result = (|| -> Result<(Release, VerifiedSetup), String> {
+                // Fresh links: the page may only know the version from the
+                // state file.
+                let release = match known {
+                    Some(r) => r,
+                    None => explorer_win::update::fetch_latest().map_err(|e| format!("{e:#}"))?,
+                };
+                if release.version <= Version::current() {
+                    return Err(tr(
+                        lang,
+                        "You already have the latest version.",
+                        "Ya tienes la última versión.",
+                    )
+                    .into());
+                }
+                let mut last_pct = u64::MAX;
+                let mut progress = |n: u64, total: Option<u64>| {
+                    let pct = total
+                        .filter(|t| *t > 0)
+                        .map(|t| n * 100 / t)
+                        .unwrap_or(n >> 20);
+                    if pct != last_pct {
+                        last_pct = pct;
+                        let _ = tx.send(UpdMsg::Progress(n, total));
+                        post_upd(hwnd);
+                    }
+                    true
+                };
+                let setup = explorer_win::update::download_setup(&release, &dir, &mut progress)
+                    .map_err(|e| format!("{e:#}"))?;
+                Ok((release, setup))
+            })();
+            if let Err(e) = &result {
+                tracing::warn!(error = %e, "update download failed");
+            }
+            let _ = tx.send(UpdMsg::Downloaded(result));
+            post_upd(hwnd);
+        });
+    }
+
+    fn on_upd_messages(&mut self) {
+        while let Ok(m) = self.upd.rx.try_recv() {
+            match m {
+                UpdMsg::Checked(state, result) => {
+                    self.upd.busy = Busy::Idle;
+                    self.upd.state = state;
+                    if let Ok(r) = result {
+                        self.upd.release = Some(r);
+                    }
+                }
+                UpdMsg::Progress(n, total) => self.upd.progress = Some((n, total)),
+                UpdMsg::Downloaded(Ok((release, setup))) => {
+                    self.upd.release = Some(release);
+                    self.start_installer(setup);
+                    return;
+                }
+                UpdMsg::Downloaded(Err(e)) => {
+                    self.upd.busy = Busy::Idle;
+                    let msg = trf(
+                        self.lang,
+                        format!("The update could not be downloaded: {e}"),
+                        format!("No se pudo descargar la actualización: {e}"),
+                    );
+                    self.upd.note = Some(msg.clone());
+                    self.updates_changed();
+                    message_box(Some(self.hwnd), &msg, MB_OK | MB_ICONWARNING);
+                }
+            }
+        }
+        self.updates_changed();
+    }
+
+    fn start_installer(&mut self, setup: VerifiedSetup) {
+        // Without a running explorer.rs there is nothing to restart; the
+        // installer would otherwise start it at the end.
+        let running = explorer_win::process::guardian_window().is_some();
+        let args = if running {
+            "--silent"
+        } else {
+            "--silent --no-launch"
+        };
+        match explorer_win::update::run_installer(&setup, args) {
+            Ok(()) => {
+                // Leave at once: the installer stops every explorer-rs*.exe
+                // of the install folder and replaces explorer-rs.exe, which
+                // this window runs from. Exiting first means it never has
+                // to kill this process and nothing here keeps files open.
+                // SAFETY: our own window.
+                let _ = unsafe { DestroyWindow(self.hwnd) };
+            }
+            Err(e) => {
+                self.upd.busy = Busy::Idle;
+                self.upd.show_folder = true;
+                let why = match e {
+                    RunError::Cancelled => self
+                        .s(
+                            "Windows did not get administrator permission (the prompt was cancelled or refused), so nothing was changed.",
+                            "Windows no obtuvo permiso de administrador (se canceló o rechazó la solicitud), así que no se ha cambiado nada.",
+                        )
+                        .to_string(),
+                    RunError::Failed(m) => trf(
+                        self.lang,
+                        format!("The installer could not be started: {m}"),
+                        format!("No se pudo iniciar el instalador: {m}"),
+                    ),
+                };
+                self.upd.note = Some(why.clone());
+                self.updates_changed();
+                let msg = trf(
+                    self.lang,
+                    format!("{why}\n\nThe verified installer is in {}. You can run it yourself (\"Open the download folder\", right-click it, \"Run as administrator\"), or download it from the release page.", setup.path.display()),
+                    format!("{why}\n\nEl instalador comprobado está en {}. Puedes ejecutarlo tú mismo (\"Abrir la carpeta de descarga\", clic derecho, \"Ejecutar como administrador\") o descargarlo desde la página de la versión.", setup.path.display()),
+                );
+                message_box(Some(self.hwnd), &msg, MB_OK | MB_ICONWARNING);
+            }
+        }
+    }
+
+    fn open_release_page(&mut self) {
+        let url = self
+            .upd
+            .release
+            .as_ref()
+            .map(|r| r.page.clone())
+            .or_else(|| {
+                self.upd
+                    .state
+                    .latest
+                    .as_ref()
+                    .and_then(|k| k.parsed())
+                    .map(|v| format!("{}/tag/v{v}", up::RELEASES_PAGE))
+            })
+            .unwrap_or_else(|| up::RELEASES_PAGE.to_string());
+        if let Err(e) = explorer_win::apps::shell_execute(&url, false) {
+            tracing::warn!(error = %e, "cannot open the release page");
+        }
+    }
+
+    fn open_download_folder(&mut self) {
+        let dir = self.upd.downloads.to_string_lossy().into_owned();
+        if let Err(e) = explorer_win::apps::shell_execute(&dir, false) {
+            tracing::warn!(error = %e, "cannot open the download folder");
+        }
     }
 }
 
@@ -1263,8 +1782,22 @@ impl Handler for Settings {
             WM_ACTIVATE => {
                 if (wparam.0 & 0xFFFF) as u32 != WA_INACTIVE {
                     self.refresh_from_disk();
+                    self.reload_update_state();
                 }
                 None
+            }
+            WM_APP_UPD => {
+                self.on_upd_messages();
+                Some(LRESULT(0))
+            }
+            WM_APP_UPDATE_NOW => {
+                self.show_section(self.upd.section);
+                self.update_now();
+                Some(LRESULT(0))
+            }
+            WM_APP_SHOW_UPDATES => {
+                self.show_section(self.upd.section);
+                Some(LRESULT(0))
             }
             WM_GETMINMAXINFO => {
                 // SAFETY: lparam points to the MINMAXINFO for this message.
@@ -1333,9 +1866,19 @@ impl Handler for Host {
             s.create_controls();
             s.update_fonts();
             s.layout();
-            s.show_section(0);
+            s.show_section(match s.start {
+                Start::Normal => 0,
+                _ => s.upd.section,
+            });
             // SAFETY: valid window.
             let _ = unsafe { SetFocus(Some(s.list)) };
+            if s.start == Start::UpdateNow {
+                // After the window is shown, so its dialogs have an owner
+                // on screen.
+                // SAFETY: posting to our own window.
+                let _ =
+                    unsafe { PostMessageW(Some(hwnd), WM_APP_UPDATE_NOW, WPARAM(0), LPARAM(0)) };
+            }
             return Some(LRESULT(0));
         }
         if s.hwnd.is_invalid() {
@@ -1386,7 +1929,8 @@ impl PaintState {
             });
         let c = &self.colors;
         let (fg, bg, brush) = match (msg, role) {
-            // Push buttons sit in the bottom bar.
+            (_, Role::PanelButton) => (c.text, c.bg, self.bg_brush),
+            // Other push buttons sit in the bottom bar.
             (WM_CTLCOLORBTN, _) => (c.text, c.bar, self.bar_brush),
             (_, Role::Side) => (c.text, c.bar, self.bar_brush),
             (_, Role::Edit) => (c.text, c.edit, self.edit_brush),
@@ -1535,8 +2079,9 @@ fn set_icon(hwnd: HWND) {
     }
 }
 
-/// Bring an already open settings window to the front.
-fn activate_existing() {
+/// Bring an already open settings window to the front (on the Updates
+/// page, and updating, when asked for).
+fn activate_existing(start: Start) {
     let class = WideString::new(CLASS);
     // SAFETY: valid class string; plain window calls.
     unsafe {
@@ -1545,15 +2090,23 @@ fn activate_existing() {
                 let _ = ShowWindow(h, SW_RESTORE);
             }
             let _ = SetForegroundWindow(h);
+            let msg = match start {
+                Start::Normal => None,
+                Start::Updates => Some(WM_APP_SHOW_UPDATES),
+                Start::UpdateNow => Some(WM_APP_UPDATE_NOW),
+            };
+            if let Some(m) = msg {
+                let _ = PostMessageW(Some(h), m, WPARAM(0), LPARAM(0));
+            }
         }
     }
 }
 
 /// `explorer-rs --settings`. `path` is the config file; `config_override`
 /// is the `--config` argument, passed on to `--edit-config`.
-pub fn run(path: PathBuf, config_override: Option<PathBuf>) -> i32 {
+pub fn run(path: PathBuf, config_override: Option<PathBuf>, start: Start) -> i32 {
     let Some(_instance) = explorer_win::single_instance::acquire(MUTEX) else {
-        activate_existing();
+        activate_existing(start);
         return 0;
     };
     let loaded = match settings::load(&path) {
@@ -1619,6 +2172,8 @@ pub fn run(path: PathBuf, config_override: Option<PathBuf>) -> i32 {
         section: 0,
         scroll: 0,
         content_h: 0,
+        upd: UpdatesUi::new(),
+        start,
     };
     let hwnd = match window::create(
         CreateParams {

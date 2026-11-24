@@ -89,6 +89,25 @@ Without options, a silent install uses the previous choices, or the defaults
 | 2 | cancelled by the user |
 | 3 | success, but a reboot is needed to delete files that were in use |
 
+### Updates
+
+explorer.rs checks GitHub once a day for a newer release (the
+`general.check_updates` setting; Settings -> **Updates** turns it off). While
+one is available, a small card above the clock says so every few days, with
+**Update now**, **Later** and **Don't remind me again** (for that version).
+Nothing is installed without your click, and no check runs while it is off.
+
+**Update now** (on the card, or Settings -> Updates) downloads the new
+`explorer-rs-setup-<version>-x64.exe` and the release's `SHA256SUMS.txt` to
+`%LOCALAPPDATA%\explorer-rs\updates`, refuses the file unless its name,
+size and SHA-256 match the release, and runs it with `--silent` after
+Windows asks for administrator permission. A silent upgrade keeps the start
+mode, the fast file search choice and all your settings; explorer.rs is
+stopped and started again. If the permission prompt is refused or does not
+appear, the downloaded installer stays in that folder: run it yourself, or
+get it from the [releases page](https://github.com/Dasemu/explorer.rs/releases).
+A portable copy is not updated in place; it is sent to the releases page.
+
 ### Uninstall
 
 Settings -> Apps -> **Installed apps** -> explorer.rs -> Uninstall, or the

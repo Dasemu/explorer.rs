@@ -269,15 +269,32 @@ pub fn edit_config(over: Option<&Path>) -> i32 {
     }
 }
 
+/// Which page `--settings` opens on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsPage {
+    Normal,
+    /// `--updates`
+    Updates,
+    /// `--update-now`: the Updates page, already installing.
+    UpdateNow,
+}
+
 /// `--settings`: the settings window.
-pub fn settings(over: Option<&Path>) -> i32 {
+pub fn settings(over: Option<&Path>, page: SettingsPage) -> i32 {
     let path = config_path(&AppPaths::from_env(), over);
     #[cfg(windows)]
     {
-        crate::settings_ui::run(path, over.map(Path::to_path_buf))
+        use crate::settings_ui::Start;
+        let start = match page {
+            SettingsPage::Normal => Start::Normal,
+            SettingsPage::Updates => Start::Updates,
+            SettingsPage::UpdateNow => Start::UpdateNow,
+        };
+        crate::settings_ui::run(path, over.map(Path::to_path_buf), start)
     }
     #[cfg(not(windows))]
     {
+        let _ = page;
         eprintln!(
             "--settings only works on Windows; edit {} instead",
             path.display()

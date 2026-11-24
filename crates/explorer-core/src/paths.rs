@@ -80,6 +80,17 @@ impl AppPaths {
         self.state_dir.join("launch-history.toml")
     }
 
+    /// Self-update state: last check, latest release seen, reminders
+    /// (`explorer_core::update::UpdateState`).
+    pub fn update_state_file(&self) -> PathBuf {
+        self.state_dir.join("update.toml")
+    }
+
+    /// Where the self-updater downloads installers before running them.
+    pub fn updates_dir(&self) -> PathBuf {
+        self.state_dir.join("updates")
+    }
+
     /// Create all directories if missing.
     pub fn ensure(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.config_dir)?;

@@ -48,6 +48,9 @@ pub struct GeneralConfig {
     /// Opening slides, fades and hover transitions. Also off when Windows'
     /// "Animation effects" setting is off.
     pub animations: bool,
+    /// Look for a new explorer.rs release once a day and remind the user
+    /// (every few days) while one is available. Never installs by itself.
+    pub check_updates: bool,
 }
 
 impl Default for GeneralConfig {
@@ -58,6 +61,7 @@ impl Default for GeneralConfig {
             theme: ThemeMode::System,
             language: crate::i18n::LanguageSetting::System,
             animations: true,
+            check_updates: true,
         }
     }
 }

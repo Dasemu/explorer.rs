@@ -868,7 +868,7 @@ fn hit(st: &State, x: f32, y: f32) -> Part {
 }
 
 /// Text colour on an accent-coloured background.
-fn on_accent(pal: &Palette) -> u32 {
+pub(crate) fn on_accent(pal: &Palette) -> u32 {
     if explorer_core::theme::luminance(pal.accent_text) > 0.5 {
         0x000000
     } else {

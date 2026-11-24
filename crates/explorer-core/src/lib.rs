@@ -46,6 +46,7 @@ pub mod textedit;
 pub mod theme;
 pub mod tray;
 pub mod tray_promotion;
+pub mod update;
 pub mod wallpaper;
 pub mod window_filter;
 

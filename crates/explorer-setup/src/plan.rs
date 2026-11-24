@@ -694,16 +694,23 @@ pub fn install_plan(
 }
 
 /// Steps undoing what must not stay half-done after a fatal failure: a
-/// registered shell is restored.
+/// registered shell is restored, and if explorer.rs was stopped, Windows
+/// Explorer is started when no shell is left (a failed silent upgrade,
+/// e.g. from the self-updater, must not leave the user without a desktop:
+/// the stopped guardian also owned the emergency hotkeys).
 pub fn rollback(executed: &[Step]) -> Vec<Step> {
-    executed
+    let mut steps: Vec<Step> = executed
         .iter()
         .rev()
         .filter_map(|s| match s {
             Step::RegisterShell { sid, .. } => Some(Step::RestoreShell { sid: sid.clone() }),
             _ => None,
         })
-        .collect()
+        .collect();
+    if executed.contains(&Step::StopProcesses) {
+        steps.push(Step::StartExplorerIfMissing);
+    }
+    steps
 }
 
 /// The uninstall plan.
@@ -996,8 +1003,17 @@ mod tests {
                 args: "--shell".into(),
             },
         ];
-        assert_eq!(rollback(&executed), vec![Step::RestoreShell { sid }]);
+        assert_eq!(
+            rollback(&executed),
+            vec![Step::RestoreShell { sid: sid.clone() }]
+        );
         assert!(rollback(&[Step::ExtractFiles]).is_empty());
+        let mut stopped = vec![Step::StopProcesses];
+        stopped.extend(executed);
+        assert_eq!(
+            rollback(&stopped),
+            vec![Step::RestoreShell { sid }, Step::StartExplorerIfMissing]
+        );
     }
 
     #[test]

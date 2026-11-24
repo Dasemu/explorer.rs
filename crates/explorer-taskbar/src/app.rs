@@ -42,6 +42,7 @@ use explorer_core::taskbar_groups::{
 use explorer_core::taskbar_model::{TaskbarModel, WindowEvent};
 use explorer_core::theme::Palette;
 use explorer_core::tray_promotion::NotifySetting;
+use explorer_core::update::{self, UpdateState};
 use explorer_core::window_filter::FilterRules;
 use explorer_win::gfx::Gfx;
 use explorer_win::keyboard::{WinKeyHook, WM_APP_WINKEY};
@@ -60,6 +61,7 @@ use explorer_win::windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::bar::Bar;
 use crate::flyout;
+use crate::update_toast;
 use crate::workers::{
     CatalogApp, ShellDone, ShellJob, ShellWorker, SysCmd, SysStatus, SysWorker, WM_APP_SHELL_DONE,
     WM_APP_SYS_CHANGED,
@@ -69,6 +71,10 @@ use crate::Args;
 const CONTROLLER_CLASS: &str = "ExplorerRs.TaskbarController";
 
 const WM_APP_INIT: u32 = WM_APP + 1;
+/// The background update check finished (state file written).
+const WM_APP_UPDATE_CHECKED: u32 = WM_APP + 30;
+/// Close the update reminder (posted by the reminder itself).
+const WM_APP_HIDE_UPDATE: u32 = WM_APP + 31;
 
 const TIMER_CLOCK: usize = 1;
 const TIMER_RESYNC: usize = 2;
@@ -84,6 +90,12 @@ const TIMER_HIDE_WIN_TASKBAR: usize = 41;
 /// switch after they were activated).
 const TIMER_FULLSCREEN: usize = 42;
 const FULLSCREEN_CHECK_MS: u32 = 500;
+/// Self-update: is a check due, or a reminder? First a while after start
+/// (not during sign-in), then every 15 minutes. The check itself runs at
+/// most once a day (`explorer_core::update::should_check`).
+const TIMER_UPDATE: usize = 43;
+const UPDATE_FIRST_MS: u32 = 90_000;
+const UPDATE_EVERY_MS: u32 = 15 * 60_000;
 const HIDE_WIN_TASKBAR_MS: u32 = 2_000;
 /// Re-read a window's AppUserModelID at most this often (apps such as
 /// Chrome set it shortly after creating the window).
@@ -194,6 +206,8 @@ pub(crate) struct Shared {
     show_desktop: RefCell<ShowDesktop>,
     show_desktop_at: Cell<Option<Instant>>,
     pub controller: Cell<HWND>,
+    /// The "update available" reminder, if shown.
+    pub update_toast: Cell<HWND>,
 }
 
 impl Shared {
@@ -698,6 +712,7 @@ pub fn run(args: Args) -> i32 {
         show_desktop: RefCell::new(ShowDesktop::default()),
         show_desktop_at: Cell::new(None),
         controller: Cell::new(HWND::default()),
+        update_toast: Cell::new(HWND::default()),
         config,
     });
     shared.reload_appearance();
@@ -705,6 +720,7 @@ pub fn run(args: Args) -> i32 {
     window::register_class(CONTROLLER_CLASS, None);
     window::register_class(TASKBAR_WINDOW_CLASS, None);
     flyout::register_class();
+    update_toast::register_class();
 
     let controller = match window::create(
         CreateParams {
@@ -725,6 +741,9 @@ pub fn run(args: Args) -> i32 {
             win_taskbar_state: (mode == RunMode::Dev && shared.config.taskbar.hide_windows_taskbar)
                 .then(|| paths.windows_taskbar_state_file()),
             taskbar_state_file: paths.windows_taskbar_state_file(),
+            update_state_file: paths.update_state_file(),
+            update_checking: false,
+            update_shown: false,
         }),
     ) {
         Ok(h) => h,
@@ -744,6 +763,7 @@ pub fn run(args: Args) -> i32 {
         explorer_win::win_taskbar::restore(&paths.windows_taskbar_state_file());
     }
     // Release thumbnails and the tray (and its window) before COM goes away.
+    update_toast::hide(&shared);
     shared.flyout.borrow_mut().take();
     shared.tray.borrow_mut().take();
     let code = window::exit_code();
@@ -767,6 +787,27 @@ struct Controller {
     /// Where the user's own Windows taskbar auto-hide choice is kept while
     /// we hide that taskbar (read for `auto_hide = "system"`).
     taskbar_state_file: std::path::PathBuf,
+    /// `%LOCALAPPDATA%\explorer-rs\update.toml`.
+    update_state_file: std::path::PathBuf,
+    /// A background update check is running.
+    update_checking: bool,
+    /// The update reminder was shown by this taskbar (at most once per
+    /// sign-in session; restarts are covered by the 3-day interval).
+    update_shown: bool,
+}
+
+/// Ask the controller to close the update reminder (the reminder must not
+/// destroy itself from inside its own window procedure).
+pub(crate) fn post_hide_update_toast(shared: &Shared) {
+    // SAFETY: posting to our own window.
+    let _ = unsafe {
+        PostMessageW(
+            Some(shared.controller.get()),
+            WM_APP_HIDE_UPDATE,
+            WPARAM(0),
+            LPARAM(0),
+        )
+    };
 }
 
 /// Whether the bars should auto-hide.
@@ -779,6 +820,60 @@ fn auto_hide_wanted(setting: AutoHide, state_file: &std::path::Path) -> bool {
 }
 
 impl Controller {
+    /// Timer: start the daily check if due, else see whether to remind.
+    fn update_tick(&mut self) {
+        if !self.shared.config.general.check_updates || self.update_checking {
+            return;
+        }
+        let state = UpdateState::load(&self.update_state_file);
+        if update::should_check(&state, update::unix_now()) {
+            self.update_checking = true;
+            let file = self.update_state_file.clone();
+            let controller = self.shared.controller.get().0 as isize;
+            // Network I/O off the UI thread. Failures are only logged.
+            std::thread::spawn(move || {
+                let _ = explorer_win::update::check_and_record(&file);
+                // SAFETY: posting to our own window (gone = harmless).
+                let _ = unsafe {
+                    PostMessageW(
+                        Some(HWND(controller as *mut core::ffi::c_void)),
+                        WM_APP_UPDATE_CHECKED,
+                        WPARAM(0),
+                        LPARAM(0),
+                    )
+                };
+            });
+        } else {
+            self.maybe_remind(state);
+        }
+    }
+
+    fn maybe_remind(&mut self, mut state: UpdateState) {
+        let now = update::unix_now();
+        let current = update::Version::current();
+        let ctx = update::RemindContext {
+            enabled: self.shared.config.general.check_updates,
+            shown_this_session: self.update_shown || update_toast::is_shown(&self.shared),
+            fullscreen: !self.shared.fullscreen.borrow().is_empty(),
+        };
+        if !update::should_remind(&state, current, now, ctx) {
+            return;
+        }
+        let Some((_, version)) = state.available(current) else {
+            return;
+        };
+        // Recorded when shown: "Later" (or ignoring it) waits the full
+        // interval.
+        state.mark_reminded(version, now);
+        if let Err(e) = state.save(&self.update_state_file) {
+            // Without the record it would come back at every start.
+            tracing::warn!(error = %e, "cannot save the update state; not reminding");
+            return;
+        }
+        self.update_shown = true;
+        update_toast::show(&self.shared, version);
+    }
+
     fn post_bars(&self, msg: u32) {
         for &b in self.shared.bars.borrow().iter() {
             // SAFETY: posting to our own window.
@@ -814,6 +909,10 @@ impl Controller {
         }
         if now != *self.shared.fullscreen.borrow() {
             tracing::info!(monitors = now.len(), windows = ?now.iter().map(|p| p.1).collect::<Vec<_>>(), "full-screen apps changed");
+        }
+        if !now.is_empty() {
+            // Never over a game, video or presentation.
+            update_toast::hide(&self.shared);
         }
         *self.shared.fullscreen.borrow_mut() = now;
         for &b in self.shared.bars.borrow().iter() {
@@ -1118,7 +1217,19 @@ impl Handler for Controller {
                     SetTimer(Some(hwnd), TIMER_CLOCK, 1000, None);
                     SetTimer(Some(hwnd), TIMER_RESYNC, RESYNC_MS, None);
                     SetTimer(Some(hwnd), TIMER_FULLSCREEN, FULLSCREEN_CHECK_MS, None);
+                    if self.shared.config.general.check_updates {
+                        SetTimer(Some(hwnd), TIMER_UPDATE, UPDATE_FIRST_MS, None);
+                    }
                 }
+                Some(LRESULT(0))
+            }
+            WM_APP_UPDATE_CHECKED => {
+                self.update_checking = false;
+                self.maybe_remind(UpdateState::load(&self.update_state_file));
+                Some(LRESULT(0))
+            }
+            WM_APP_HIDE_UPDATE => {
+                update_toast::hide(&self.shared);
                 Some(LRESULT(0))
             }
             WM_APP_WINEVENT => {
@@ -1237,6 +1348,12 @@ impl Handler for Controller {
                     }
                     TIMER_RESYNC => self.resync(),
                     TIMER_FULLSCREEN => self.check_fullscreen(false),
+                    TIMER_UPDATE => {
+                        // SAFETY: re-arming our own timer (after the first,
+                        // shorter delay).
+                        unsafe { SetTimer(Some(hwnd), TIMER_UPDATE, UPDATE_EVERY_MS, None) };
+                        self.update_tick();
+                    }
                     TIMER_HIDE_WIN_TASKBAR => self.rehide_win_taskbar(),
                     TIMER_REBUILD => {
                         // SAFETY: our own timer.
