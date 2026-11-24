@@ -50,6 +50,7 @@ pub struct GeneralConfig {
     pub animations: bool,
     /// Look for a new explorer.rs release once a day and remind the user
     /// (every few days) while one is available. Never installs by itself.
+    /// Off by default: the check contacts GitHub, so the user opts in.
     pub check_updates: bool,
 }
 
@@ -61,7 +62,7 @@ impl Default for GeneralConfig {
             theme: ThemeMode::System,
             language: crate::i18n::LanguageSetting::System,
             animations: true,
-            check_updates: true,
+            check_updates: false,
         }
     }
 }
@@ -482,6 +483,20 @@ mod tests {
         assert_eq!(c.taskbar.position, Edge::Top);
         assert_eq!(c.taskbar.height, 32);
         assert!(c.taskbar.show_clock);
+    }
+
+    #[test]
+    fn update_checks_are_opt_in() {
+        // No network request unless the user turned it on.
+        assert!(!Config::default().general.check_updates);
+        assert!(!Config::from_toml("").unwrap().general.check_updates);
+        let on = Config::from_toml(
+            "[general]
+check_updates = true
+",
+        )
+        .unwrap();
+        assert!(on.general.check_updates);
     }
 
     #[test]

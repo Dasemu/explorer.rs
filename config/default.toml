@@ -25,8 +25,10 @@ animations = true
 # Check GitHub once a day for a new explorer.rs release and, while one is
 # available, show a small reminder next to the clock every few days.
 # Nothing is ever installed without asking: updating is a button
-# (in the reminder or in Settings > Updates). false = never check.
-check_updates = true
+# (in the reminder or in Settings > Updates). Off by default (the check
+# contacts GitHub); set true to turn it on. "Check now" in Settings >
+# Updates works either way.
+check_updates = false
 
 [taskbar]
 # Screen edge: "bottom" or "top".

@@ -91,8 +91,10 @@ Without options, a silent install uses the previous choices, or the defaults
 
 ### Updates
 
-explorer.rs checks GitHub once a day for a newer release (the
-`general.check_updates` setting; Settings -> **Updates** turns it off). While
+Automatic checks are **off by default**: explorer.rs contacts GitHub only
+if you turn on `general.check_updates` (Settings -> **Updates** -> *Check
+for updates automatically*). With it on, it checks once a day for a newer
+release. **Check now** in Settings -> Updates works with the option off. While
 one is available, a small card above the clock says so every few days, with
 **Update now**, **Later** and **Don't remind me again** (for that version).
 Nothing is installed without your click, and no check runs while it is off.
