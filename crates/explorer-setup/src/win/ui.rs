@@ -1244,9 +1244,16 @@ impl Wizard {
         }
     }
 
+    /// Ends the message loop. The window is *not* destroyed here: this runs
+    /// inside the window's own handler, and `DestroyWindow` from there makes
+    /// `WM_DESTROY` (not deferrable while the handler is borrowed) get
+    /// dropped, so `PostQuitMessage` never ran and the process stayed alive
+    /// (see LESSONS.md, "Never DestroyWindow a window from inside its own
+    /// handler"). `run` destroys the window after the loop, outside any
+    /// handler.
     fn close(&mut self) {
-        // SAFETY: our own window.
-        let _ = unsafe { DestroyWindow(self.hwnd) };
+        // SAFETY: plain call.
+        unsafe { PostQuitMessage(self.exit_code) };
     }
 }
 
@@ -1486,6 +1493,9 @@ fn run(kind: Kind) -> i32 {
         // SAFETY: msg came from GetMessageW; hwnd is our window.
         unsafe { IsDialogMessageW(hwnd, msg) }.as_bool()
     });
+    // Outside every handler now, so the window's state is freed normally.
+    // SAFETY: our own window, still alive.
+    let _ = unsafe { DestroyWindow(hwnd) };
     tracing::info!(code, "wizard closed");
     code
 }
