@@ -47,6 +47,16 @@ Download `explorer-rs-setup-<version>-x64.exe` from the
      user, so it needs an **administrator** account; for a standard user
      setup skips it with a warning and the index walks folders instead
      (works, first scan slower).
+   - **Check for updates automatically?** *Yes* / *No*, with no default on
+     a first install: **Install** stays disabled until you pick one. *Yes*
+     means once a day explorer.rs asks GitHub whether a new version exists
+     and shows a reminder while one does; nothing is installed without
+     asking (see [Updates](#updates)). On an upgrade your previous answer is
+     pre-selected (an upgrade from a version that did not ask yet asks).
+     The answer is stored machine-wide as `CheckUpdates` (DWORD 1/0) under
+     `HKLM\Software\explorer-rs` and is only a default: a
+     `general.check_updates` key in your `config.toml` (written when you
+     change the box in Settings -> Updates) wins.
    - **Start explorer.rs now** (default on).
    - The install folder is fixed: `%ProgramFiles%\explorer-rs`. Only
      administrators can change files there, which the elevated index helper
@@ -76,11 +86,17 @@ disappears for a moment.
 ### Silent install and command line
 
 ```
-explorer-rs-setup.exe --silent [--mode=alongside|shell|none] [--file-search=on|off] [--no-launch] [--lang=en|es]
+explorer-rs-setup.exe --silent [--mode=alongside|shell|none] [--file-search=on|off] [--updates=on|off] [--no-launch] [--lang=en|es]
 ```
 
 Without options, a silent install uses the previous choices, or the defaults
 (shell mode, fast file search on, start now). `/silent` and `/?` work too.
+
+`--updates=on|off` answers "Check for updates automatically?". Without it, a
+silent install keeps the previous install's answer; with no previous answer
+(first install, or an upgrade from a version that did not ask) it uses
+**on**, the app's built-in default. `--updates` also works without
+`--silent`: the wizard then starts with that answer selected.
 
 | Exit code | Meaning |
 |---|---|
@@ -91,8 +107,16 @@ Without options, a silent install uses the previous choices, or the defaults
 
 ### Updates
 
-explorer.rs checks GitHub once a day for a newer release (the
-`general.check_updates` setting; Settings -> **Updates** turns it off). While
+explorer.rs checks GitHub once a day for a newer release if you answered
+*Yes* to "Check for updates automatically?" in the installer; Settings ->
+**Updates** changes it at any time. Which answer applies:
+
+1. `general.check_updates` in `%APPDATA%\explorer-rs\config.toml`, if the
+   key is there (Settings writes it only when you change the box);
+2. else the installer's answer (`HKLM\Software\explorer-rs\CheckUpdates`);
+3. else on (portable copies, installs from before the question existed).
+
+While
 one is available, a small card above the clock says so every few days, with
 **Update now**, **Later** and **Don't remind me again** (for that version).
 Nothing is installed without your click, and no check runs while it is off.
@@ -102,7 +126,8 @@ Nothing is installed without your click, and no check runs while it is off.
 `%LOCALAPPDATA%\explorer-rs\updates`, refuses the file unless its name,
 size and SHA-256 match the release, and runs it with `--silent` after
 Windows asks for administrator permission. A silent upgrade keeps the start
-mode, the fast file search choice and all your settings; explorer.rs is
+mode, the fast file search choice, your "check for updates" answer and all
+your settings; explorer.rs is
 stopped and started again. If the permission prompt is refused or does not
 appear, the downloaded installer stays in that folder: run it yourself, or
 get it from the [releases page](https://github.com/FerroApps/explorer.rs/releases).

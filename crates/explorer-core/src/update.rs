@@ -3,8 +3,9 @@
 //!
 //! explorer.rs can check GitHub for a newer release and install it with the
 //! release's own setup program (`--silent`, which keeps the installed start
-//! mode and never touches the user's settings). Everything that can be
-//! decided without Windows lives here and is unit tested:
+//! mode and "check for updates" answer, and never touches the user's
+//! settings). Everything that can be decided without Windows lives here
+//! and is unit tested:
 //!
 //! - [`Version`]: `X.Y.Z` with an optional `v`; anything else (pre-release
 //!   suffixes included) is not a version we offer;
@@ -436,7 +437,8 @@ pub fn should_check(state: &UpdateState, now: u64) -> bool {
 /// What the reminder rule needs besides the stored state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RemindContext {
-    /// `general.check_updates`.
+    /// The effective `general.check_updates`
+    /// ([`crate::config::GeneralConfig::check_updates_with`]).
     pub enabled: bool,
     /// A reminder was already shown in this sign-in session.
     pub shown_this_session: bool,

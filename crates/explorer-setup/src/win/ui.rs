@@ -46,14 +46,14 @@ use explorer_win::windows::Win32::UI::WindowsAndMessaging::{
     IsDialogMessageW, LoadImageW, MessageBoxW, PostMessageW, PostQuitMessage, SendMessageW,
     SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, BM_CLICK, BM_GETCHECK,
     BM_SETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON, BS_DEFPUSHBUTTON, BS_PUSHBUTTON,
-    ES_AUTOHSCROLL, ES_MULTILINE, ES_READONLY, GWLP_WNDPROC, HICON, HMENU, ICON_BIG, ICON_SMALL,
-    IDNO, IMAGE_ICON, LR_DEFAULTCOLOR, MB_ICONERROR, MB_ICONQUESTION, MB_OK, MB_YESNO,
-    MESSAGEBOX_STYLE, NONCLIENTMETRICSW, SM_CXSCREEN, SM_CYSCREEN, SPI_GETNONCLIENTMETRICS,
-    STN_CLICKED, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_APP, WM_CLOSE, WM_COMMAND, WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED,
-    WM_ERASEBKGND, WM_PAINT, WM_SETFONT, WM_SETICON, WNDPROC, WS_CAPTION, WS_CHILD,
-    WS_EX_CLIENTEDGE, WS_EX_CONTROLPARENT, WS_GROUP, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
-    WS_TABSTOP, WS_VSCROLL,
+    BS_RADIOBUTTON, ES_AUTOHSCROLL, ES_MULTILINE, ES_READONLY, GWLP_WNDPROC, HICON, HMENU,
+    ICON_BIG, ICON_SMALL, IDNO, IMAGE_ICON, LR_DEFAULTCOLOR, MB_ICONERROR, MB_ICONQUESTION, MB_OK,
+    MB_YESNO, MESSAGEBOX_STYLE, NONCLIENTMETRICSW, SM_CXSCREEN, SM_CYSCREEN,
+    SPI_GETNONCLIENTMETRICS, STN_CLICKED, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOW,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CTLCOLORBTN, WM_CTLCOLORSTATIC,
+    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_PAINT, WM_SETFONT, WM_SETICON, WNDPROC,
+    WS_CAPTION, WS_CHILD, WS_EX_CLIENTEDGE, WS_EX_CONTROLPARENT, WS_GROUP, WS_MINIMIZEBOX,
+    WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VSCROLL,
 };
 
 use crate::cli::exit;
@@ -82,13 +82,21 @@ const ID_C_LAUNCH: u16 = 132;
 const ID_L_LAUNCH: u16 = 133;
 const ID_C_DATA: u16 = 134;
 const ID_L_DATA: u16 = 135;
+const ID_R_UPD_YES: u16 = 140;
+const ID_R_UPD_NO: u16 = 141;
+const ID_L_UPD_YES: u16 = 142;
+const ID_L_UPD_NO: u16 = 143;
 
-// Client size in DIPs.
+// Client size in DIPs. The Options page is the tallest: with both warnings
+// shown it ends at y = 547, above the button bar at H - BAR = 554. H stays
+// small enough for 1920x1080 at 150% (720 DIPs minus the taskbar).
 const W: i32 = 620;
-const H: i32 = 540;
+const H: i32 = 610;
 const BAR: i32 = 56;
 const M: i32 = 24;
 const GLYPH: i32 = 20;
+/// Width of one Yes/No radio (glyph + short label).
+const YES_NO_W: i32 = 80;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Page {
@@ -258,6 +266,12 @@ struct Wizard {
     c_search: HWND,
     l_search: HWND,
     d_search: HWND,
+    /// "Check for updates automatically?": question, explanation and the
+    /// Yes / No radios with their labels.
+    upd_label: HWND,
+    upd_desc: HWND,
+    upd_radios: [HWND; 2],
+    upd_labels: [HWND; 2],
     c_launch: HWND,
     l_launch: HWND,
     dir_label: HWND,
@@ -494,6 +508,75 @@ impl Wizard {
             none,
             0,
         );
+        // Created here, between the search check box and the launch check
+        // box (both WS_GROUP), so the two radios form their own group.
+        self.upd_label = make(
+            p,
+            w!("STATIC"),
+            s(
+                "Check for updates automatically?",
+                "¿Buscar actualizaciones automáticamente?",
+            ),
+            st,
+            none,
+            0,
+        );
+        self.upd_desc = make(
+            p,
+            w!("STATIC"),
+            s(
+                "Once a day, explorer.rs asks GitHub whether a new version exists. Nothing is installed without asking you; you can change this later in the settings.",
+                "Una vez al día, explorer.rs pregunta a GitHub si hay una versión nueva. No se instala nada sin preguntarte; puedes cambiarlo después en la configuración.",
+            ),
+            st,
+            none,
+            0,
+        );
+        let answers: [(u16, u16, &str); 2] = [
+            (ID_R_UPD_YES, ID_L_UPD_YES, s("Yes", "Sí")),
+            (ID_R_UPD_NO, ID_L_UPD_NO, "No"),
+        ];
+        for (i, (rid, lid, label)) in answers.into_iter().enumerate() {
+            let group = if i == 0 { WS_GROUP } else { WINDOW_STYLE(0) };
+            // BS_RADIOBUTTON, not BS_AUTORADIOBUTTON: the dialog manager
+            // checks an automatic radio button when the arrow keys move the
+            // focus onto it, which would answer the question for a user
+            // who was only moving through the page. Checks are set in
+            // `on_command`, on an actual click or Space. Textless glyph
+            // with the label in the STATIC next to it, as for the modes.
+            self.upd_radios[i] = make(
+                p,
+                w!("BUTTON"),
+                "",
+                WINDOW_STYLE(BS_RADIOBUTTON as u32) | WS_TABSTOP | group,
+                none,
+                rid,
+            );
+            self.upd_labels[i] = make(
+                p,
+                w!("STATIC"),
+                label,
+                st | WINDOW_STYLE(SS_NOTIFY),
+                none,
+                lid,
+            );
+        }
+        // Shown by `show_page` through `ctls` (none has WS_VISIBLE).
+        for (h, r) in [
+            (self.upd_label, Role::Text),
+            (self.upd_desc, Role::Sub),
+            (self.upd_radios[0], Role::Text),
+            (self.upd_labels[0], Role::Text),
+            (self.upd_radios[1], Role::Text),
+            (self.upd_labels[1], Role::Text),
+        ] {
+            self.ctls.push(Ctl {
+                hwnd: h,
+                pages: opts,
+                role: r,
+                title: false,
+            });
+        }
         let launch_label = s("Start explorer.rs now", "Iniciar explorer.rs ahora");
         self.c_launch = make(p, w!("BUTTON"), "", check, none, ID_C_LAUNCH);
         self.l_launch = make(
@@ -642,6 +725,8 @@ impl Wizard {
                 self.radios[0],
                 self.radios[1],
                 self.radios[2],
+                self.upd_radios[0],
+                self.upd_radios[1],
             ] {
                 // SAFETY: valid window; failure leaves the light theme.
                 let _ = unsafe { SetWindowTheme(h, w!("DarkMode_Explorer"), PCWSTR::null()) };
@@ -658,6 +743,11 @@ impl Wizard {
             set_checked(self.radios[idx], true);
             set_checked(self.c_search, i.choices.file_search);
             set_checked(self.c_launch, i.choices.launch);
+            // Upgrade: the previous answer. Fresh install: neither, and
+            // Install stays disabled until one is picked.
+            if let Some(on) = i.choices.check_updates {
+                self.set_updates_answer(on);
+            }
         }
         // SAFETY: plain messages.
         unsafe {
@@ -786,6 +876,24 @@ impl Wizard {
         }
         y += 6;
         y = self.place_choice(self.c_search, self.l_search, Some((self.d_search, 2)), M, y) + 10;
+        // Updates: the question with Yes / No on the same row (one row less
+        // than stacking them, so the page fits), the explanation below.
+        let yes_x = W - M - 2 * YES_NO_W;
+        self.place(self.upd_label, M, y + 2, yes_x - M - 8, 20);
+        for i in 0..2 {
+            let x = yes_x + i as i32 * YES_NO_W;
+            self.place(self.upd_radios[i], x, y, GLYPH, 20);
+            self.place(
+                self.upd_labels[i],
+                x + GLYPH + 4,
+                y + 2,
+                YES_NO_W - GLYPH - 8,
+                20,
+            );
+        }
+        y += 22;
+        self.place(self.upd_desc, M, y, cw, 34);
+        y += 34 + 10;
         y = self.place_choice(self.c_launch, self.l_launch, None, M, y) + 12;
         self.place(self.dir_label, M, y + 4, 150, 20);
         self.place(self.dir_edit, M + 154, y, cw - 154, 24);
@@ -888,7 +996,8 @@ impl Wizard {
         set_text(self.next, next);
         enable(self.back, back);
         enable(self.cancel, cancel);
-        enable(self.next, page != Page::Progress);
+        let next_on = page != Page::Progress && !self.needs_updates_answer(page);
+        enable(self.next, next_on);
         // SAFETY: valid windows.
         unsafe {
             // Buttons are created hidden (no WS_VISIBLE) and are not in
@@ -899,7 +1008,13 @@ impl Wizard {
                 self.cancel,
                 if page == Page::Done { SW_HIDE } else { SW_SHOW },
             );
-            let _ = SetFocus(Some(self.next));
+            // A disabled button cannot take the focus: start on the mode.
+            let focus = if next_on || page != Page::Options {
+                self.next
+            } else {
+                self.checked_mode_radio()
+            };
+            let _ = SetFocus(Some(focus));
         }
         match page {
             Page::Welcome => {
@@ -969,6 +1084,37 @@ impl Wizard {
         )
     }
 
+    /// The Yes / No answer picked so far, if any.
+    fn updates_answer(&self) -> Option<bool> {
+        if is_checked(self.upd_radios[0]) {
+            Some(true)
+        } else if is_checked(self.upd_radios[1]) {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    fn set_updates_answer(&self, on: bool) {
+        set_checked(self.upd_radios[0], on);
+        set_checked(self.upd_radios[1], !on);
+    }
+
+    /// Install must stay disabled: Options page without an answer yet.
+    fn needs_updates_answer(&self, page: Page) -> bool {
+        page == Page::Options
+            && matches!(self.kind, Kind::Install(_))
+            && self.updates_answer().is_none()
+    }
+
+    fn checked_mode_radio(&self) -> HWND {
+        self.radios
+            .iter()
+            .copied()
+            .find(|&h| is_checked(h))
+            .unwrap_or(self.radios[0])
+    }
+
     fn choices(&self) -> Choices {
         let mode = if is_checked(self.radios[1]) {
             StartMode::Shell
@@ -981,6 +1127,7 @@ impl Wizard {
             mode,
             file_search: is_checked(self.c_search),
             launch: is_checked(self.c_launch),
+            check_updates: self.updates_answer(),
         }
     }
 
@@ -1214,6 +1361,16 @@ impl Wizard {
             ID_L_SEARCH => toggle(self.c_search),
             ID_L_LAUNCH => toggle(self.c_launch),
             ID_L_DATA => toggle(self.c_data),
+            // The labels click their radio, which comes back as the
+            // radio's own BN_CLICKED below.
+            ID_L_UPD_YES => toggle(self.upd_radios[0]),
+            ID_L_UPD_NO => toggle(self.upd_radios[1]),
+            ID_R_UPD_YES | ID_R_UPD_NO => {
+                self.set_updates_answer(id == ID_R_UPD_YES);
+                if self.page == Page::Options {
+                    enable(self.next, true);
+                }
+            }
             ID_BACK => {
                 if self.page == Page::Options {
                     self.show_page(Page::Welcome);
@@ -1221,6 +1378,9 @@ impl Wizard {
             }
             ID_NEXT => match self.page {
                 Page::Welcome => self.show_page(Page::Options),
+                // Enter reaches here even while Install is disabled
+                // (IsDialogMessage sends IDOK for a non-dialog window).
+                Page::Options if self.needs_updates_answer(Page::Options) => {}
                 Page::Options | Page::Confirm => self.start_work(),
                 Page::Done => self.close(),
                 Page::Progress => {}
@@ -1422,6 +1582,10 @@ fn run(kind: Kind) -> i32 {
         c_search: HWND::default(),
         l_search: HWND::default(),
         d_search: HWND::default(),
+        upd_label: HWND::default(),
+        upd_desc: HWND::default(),
+        upd_radios: [HWND::default(); 2],
+        upd_labels: [HWND::default(); 2],
         c_launch: HWND::default(),
         l_launch: HWND::default(),
         dir_label: HWND::default(),

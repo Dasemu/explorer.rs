@@ -280,8 +280,12 @@ struct Settings {
     lang: Lang,
     path: PathBuf,
     config_override: Option<PathBuf>,
-    /// The file as last read or written.
+    /// The file as last read or written; `loaded.config` is passed through
+    /// `settings::shown` (effective `check_updates`).
     loaded: Loaded,
+    /// The installer's answer to "check for updates automatically?"
+    /// (HKLM), read once: it only changes when setup runs again.
+    installer_updates: Option<bool>,
     dpi: u32,
     colors: Colors,
     font: HFONT,
@@ -1206,7 +1210,10 @@ impl Settings {
         if disk.text == self.loaded.text || self.dirty() {
             return;
         }
-        self.loaded = disk;
+        self.loaded = Loaded {
+            config: settings::shown(disk.config, self.installer_updates),
+            ..disk
+        };
         self.fill(&settings::inputs_from(&self.loaded.config));
     }
 
@@ -1270,7 +1277,7 @@ impl Settings {
             } else {
                 None
             },
-            config: applied.config,
+            config: settings::shown(applied.config, self.installer_updates),
         };
         // Show the values as saved (e.g. trimmed list items).
         self.fill(&settings::inputs_from(&self.loaded.config));
@@ -2109,8 +2116,12 @@ pub fn run(path: PathBuf, config_override: Option<PathBuf>, start: Start) -> i32
         activate_existing(start);
         return 0;
     };
+    let installer_updates = explorer_win::update::installer_check_updates();
     let loaded = match settings::load(&path) {
-        Ok(l) => l,
+        Ok(l) => Loaded {
+            config: settings::shown(l.config, installer_updates),
+            ..l
+        },
         Err(e) => return broken_file(&path, config_override.as_deref(), &e),
     };
     let lang = explorer_win::theme::ui_lang(loaded.config.general.language);
@@ -2161,6 +2172,7 @@ pub fn run(path: PathBuf, config_override: Option<PathBuf>, start: Start) -> i32
         path,
         config_override,
         loaded,
+        installer_updates,
         dpi,
         colors,
         font: HFONT::default(),

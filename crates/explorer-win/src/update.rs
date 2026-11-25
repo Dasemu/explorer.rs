@@ -191,3 +191,21 @@ pub fn running_installed_copy() -> bool {
     };
     exe.parent().is_some_and(|p| norm(p) == norm(&dir))
 }
+
+/// The installer's answer to "Check for updates automatically?"
+/// (`HKLM\Software\explorer-rs\CheckUpdates`), if it recorded one.
+pub fn installer_check_updates() -> Option<bool> {
+    use explorer_core::setup::{MACHINE_KEY, VALUE_CHECK_UPDATES};
+    crate::registry::read_dword(
+        crate::registry::Root::LocalMachine,
+        MACHINE_KEY,
+        VALUE_CHECK_UPDATES,
+    )
+    .map(|v| v != 0)
+}
+
+/// Effective "check for updates automatically": the config key if the
+/// user set it, else the installer's answer, else the built-in default.
+pub fn check_updates_enabled(general: &explorer_core::config::GeneralConfig) -> bool {
+    general.check_updates_with(installer_check_updates())
+}

@@ -15,6 +15,11 @@ pub const VALUE_MODE: &str = "Mode";
 /// `REG_DWORD`: 1 if "Fast file search" was chosen (index helper task
 /// registered), 0 otherwise.
 pub const VALUE_FILE_SEARCH: &str = "FileSearch";
+/// `REG_DWORD`: the installer's answer to "Check for updates
+/// automatically?" (1 yes, 0 no). Only a default: an explicit
+/// `general.check_updates` in the user's config.toml wins
+/// (`explorer_core::config::resolve_check_updates`).
+pub const VALUE_CHECK_UPDATES: &str = "CheckUpdates";
 
 /// Per-user `Run` value name used for "run alongside Windows Explorer".
 pub const RUN_VALUE_NAME: &str = "explorer-rs";

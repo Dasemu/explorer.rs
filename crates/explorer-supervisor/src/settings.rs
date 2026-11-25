@@ -238,8 +238,8 @@ pub const SECTIONS: &[Section] = &[
                 "Buscar actualizaciones automáticamente",
             ),
             t(
-                "Once a day, ask GitHub whether a new explorer.rs version was released. While one is available, a small reminder appears next to the clock every few days. Nothing is installed without your click.",
-                "Una vez al día, preguntar a GitHub si hay una nueva versión de explorer.rs. Mientras haya una, aparece un pequeño aviso junto al reloj cada pocos días. No se instala nada sin que hagas clic.",
+                "Once a day, ask GitHub whether a new explorer.rs version was released. While one is available, a small reminder appears next to the clock every few days. Nothing is installed without your click. Until you change it here, the answer you gave in the installer applies.",
+                "Una vez al día, preguntar a GitHub si hay una nueva versión de explorer.rs. Mientras haya una, aparece un pequeño aviso junto al reloj cada pocos días. No se instala nada sin que hagas clic. Mientras no lo cambies aquí, se aplica la respuesta que diste en el instalador.",
             ),
             Kind::Bool,
         )],
@@ -706,7 +706,25 @@ fn lookup<'a>(root: &'a toml::Value, path: &str) -> Option<&'a toml::Value> {
 
 fn config_value(cfg: &Config) -> toml::Value {
     // Every Config field serializes (strings, integers, booleans, arrays).
-    toml::Value::try_from(cfg).unwrap_or_else(|_| toml::Value::Table(Default::default()))
+    // An absent `check_updates` is not serialized; the form still needs a
+    // value, so fall back to the built-in default (the window passes a
+    // config from `shown`, which already holds the effective value).
+    let mut cfg = cfg.clone();
+    cfg.general
+        .check_updates
+        .get_or_insert(explorer_core::config::DEFAULT_CHECK_UPDATES);
+    toml::Value::try_from(&cfg).unwrap_or_else(|_| toml::Value::Table(Default::default()))
+}
+
+/// The config the window shows and compares against: `cfg` (as parsed from
+/// the file) with `general.check_updates` set to its effective value,
+/// which may come from the installer (`installer_updates`, HKLM) rather
+/// than the file. Because [`apply`] only writes fields that differ from
+/// this config, an untouched check box never writes the inherited value
+/// into config.toml; only a change made in the window does.
+pub fn shown(mut cfg: Config, installer_updates: Option<bool>) -> Config {
+    cfg.general.check_updates = Some(cfg.general.check_updates_with(installer_updates));
+    cfg
 }
 
 fn current(field: &Field, root: &toml::Value) -> Parsed {
@@ -1309,6 +1327,52 @@ mod tests {
         assert_eq!(std::fs::read_dir(p.parent().unwrap()).unwrap().count(), 1);
         std::fs::write(&p, "[taskbar]\nheigth = 3\n").unwrap();
         assert!(load(&p).is_err());
+    }
+
+    /// The check box shows the effective value (config key, else the
+    /// installer's answer) and is written only when the user changes it.
+    #[test]
+    fn check_updates_inherited_from_installer_is_not_written() {
+        let text = "# mine\n[general]\nanimations = false\n";
+        let cfg = Config::from_toml(text).unwrap();
+        assert_eq!(cfg.general.check_updates, None);
+        let i = index_of(UPDATES_KEY);
+        for installer in [Some(false), Some(true), None] {
+            let shown_cfg = shown(cfg.clone(), installer);
+            let inputs = inputs_from(&shown_cfg);
+            assert_eq!(inputs[i], Input::Bool(installer.unwrap_or(true)));
+            // Untouched: nothing written, the key stays inherited.
+            let a = apply(text, &shown_cfg, &inputs).unwrap();
+            assert!(a.changed.is_empty());
+            assert_eq!(a.text, text);
+            assert_eq!(a.config.general.check_updates, None);
+            // Another field changed: still no check_updates key.
+            let mut other = inputs.clone();
+            set(&mut other, "general.animations", Input::Bool(true));
+            let a = apply(text, &shown_cfg, &other).unwrap();
+            assert!(!a.text.contains("check_updates"), "{}", a.text);
+        }
+        // Changed in the window: written explicitly.
+        let shown_cfg = shown(cfg.clone(), Some(false));
+        let mut inputs = inputs_from(&shown_cfg);
+        inputs[i] = Input::Bool(true);
+        let a = apply(text, &shown_cfg, &inputs).unwrap();
+        assert_eq!(a.changed, vec![i]);
+        assert_eq!(a.config.general.check_updates, Some(true));
+        assert!(a.text.starts_with("# mine\n"));
+        // An explicit key wins over the installer's answer.
+        let text = "[general]\ncheck_updates = true\n";
+        let cfg = shown(Config::from_toml(text).unwrap(), Some(false));
+        assert_eq!(inputs_from(&cfg)[i], Input::Bool(true));
+        // A new file (documented default, key commented out) behaves the
+        // same: untouched means unwritten.
+        let cfg = shown(Config::default(), Some(false));
+        let a = apply(DEFAULT_CONFIG_TOML, &cfg, &inputs_from(&cfg)).unwrap();
+        assert!(a.changed.is_empty());
+        let mut inputs = inputs_from(&cfg);
+        inputs[i] = Input::Bool(true);
+        let a = apply(DEFAULT_CONFIG_TOML, &cfg, &inputs).unwrap();
+        assert_eq!(a.config.general.check_updates, Some(true));
     }
 
     #[test]

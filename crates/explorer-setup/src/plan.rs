@@ -78,6 +78,10 @@ pub struct Choices {
     pub mode: StartMode,
     pub file_search: bool,
     pub launch: bool,
+    /// "Check for updates automatically?". `None` only in the wizard on a
+    /// fresh install before the user picked an answer (Install stays
+    /// disabled until then); silent installs always resolve it.
+    pub check_updates: Option<bool>,
 }
 
 /// What a previous installation recorded under HKLM\Software\explorer-rs.
@@ -86,10 +90,17 @@ pub struct PreviousInstall {
     pub version: Option<String>,
     pub mode: Option<StartMode>,
     pub file_search: Option<bool>,
+    pub check_updates: Option<bool>,
 }
 
 /// Initial choices: command line, else previous install, else defaults
 /// (replace the shell, fast file search on, start now).
+///
+/// "Check for updates" has no default in the wizard: the user must answer
+/// (unless a previous install or `--updates=` already did). A silent
+/// install cannot ask, so it falls back to the app's built-in default
+/// (`DEFAULT_CHECK_UPDATES`, on): the same behaviour as before the
+/// installer asked, and what a self-update of such an install keeps.
 pub fn initial_choices(prev: Option<&PreviousInstall>, args: &crate::cli::InstallArgs) -> Choices {
     Choices {
         mode: args
@@ -101,6 +112,12 @@ pub fn initial_choices(prev: Option<&PreviousInstall>, args: &crate::cli::Instal
             .or_else(|| prev.and_then(|p| p.file_search))
             .unwrap_or(true),
         launch: !args.no_launch,
+        check_updates: args
+            .check_updates
+            .or_else(|| prev.and_then(|p| p.check_updates))
+            .or(args
+                .silent
+                .then_some(explorer_core::config::DEFAULT_CHECK_UPDATES)),
     }
 }
 
@@ -437,7 +454,7 @@ pub fn arp_values(install_dir: &str, version: &str, size_bytes: u64) -> Vec<(Str
 /// HKLM\Software\explorer-rs values.
 pub fn machine_state(install_dir: &str, version: &str, c: &Choices) -> Vec<(String, RegValue)> {
     use explorer_core::setup::*;
-    vec![
+    let mut v = vec![
         (VALUE_INSTALL_DIR.into(), RegValue::Sz(install_dir.into())),
         (VALUE_VERSION.into(), RegValue::Sz(version.into())),
         (VALUE_MODE.into(), RegValue::Sz(c.mode.as_str().into())),
@@ -445,7 +462,13 @@ pub fn machine_state(install_dir: &str, version: &str, c: &Choices) -> Vec<(Stri
             VALUE_FILE_SEARCH.into(),
             RegValue::Dword(c.file_search as u32),
         ),
-    ]
+    ];
+    // Always set by the time setup runs (the wizard requires an answer,
+    // silent installs default it); if not, leave any older answer alone.
+    if let Some(on) = c.check_updates {
+        v.push((VALUE_CHECK_UPDATES.into(), RegValue::Dword(on as u32)));
+    }
+    v
 }
 
 /// Arguments to start explorer.rs with at the end of setup, if at all.
@@ -821,6 +844,7 @@ mod tests {
             mode,
             file_search: true,
             launch: true,
+            check_updates: Some(true),
         }
     }
 
@@ -843,6 +867,7 @@ mod tests {
             version: Some("0.0.9".into()),
             mode: Some(StartMode::Shell),
             file_search: Some(false),
+            check_updates: Some(false),
         };
         let none = InstallArgs::default();
         assert_eq!(
@@ -850,7 +875,9 @@ mod tests {
             Choices {
                 mode: StartMode::Shell,
                 file_search: true,
-                launch: true
+                launch: true,
+                // Fresh interactive install: the user must answer.
+                check_updates: None,
             }
         );
         assert_eq!(
@@ -858,7 +885,8 @@ mod tests {
             Choices {
                 mode: StartMode::Shell,
                 file_search: false,
-                launch: true
+                launch: true,
+                check_updates: Some(false),
             }
         );
         let args = InstallArgs {
@@ -866,15 +894,98 @@ mod tests {
             file_search: Some(true),
             no_launch: true,
             silent: true,
+            check_updates: Some(true),
         };
         assert_eq!(
             initial_choices(Some(&prev), &args),
             Choices {
                 mode: StartMode::None,
                 file_search: true,
-                launch: false
+                launch: false,
+                check_updates: Some(true),
             }
         );
+    }
+
+    #[test]
+    fn check_updates_answer() {
+        let silent = InstallArgs {
+            silent: true,
+            ..Default::default()
+        };
+        // Silent fresh install without --updates=: the built-in default.
+        assert_eq!(initial_choices(None, &silent).check_updates, Some(true));
+        // --updates= wins, silent or not.
+        for on in [true, false] {
+            let args = InstallArgs {
+                check_updates: Some(on),
+                ..silent.clone()
+            };
+            assert_eq!(initial_choices(None, &args).check_updates, Some(on));
+            let args = InstallArgs {
+                check_updates: Some(on),
+                ..Default::default()
+            };
+            let prev = PreviousInstall {
+                check_updates: Some(!on),
+                ..Default::default()
+            };
+            assert_eq!(initial_choices(Some(&prev), &args).check_updates, Some(on));
+        }
+        // Upgrade from a version that never asked: the wizard still asks;
+        // a silent run keeps the old behaviour (on).
+        let old = PreviousInstall {
+            version: Some("0.1.7".into()),
+            mode: Some(StartMode::Shell),
+            file_search: Some(true),
+            check_updates: None,
+        };
+        let none = InstallArgs::default();
+        assert_eq!(initial_choices(Some(&old), &none).check_updates, None);
+        assert_eq!(
+            initial_choices(Some(&old), &silent).check_updates,
+            Some(true)
+        );
+        // Recorded as a DWORD next to Mode and FileSearch.
+        let mut c = choices(StartMode::Shell);
+        for (answer, dword) in [(true, 1), (false, 0)] {
+            c.check_updates = Some(answer);
+            assert!(machine_state(DIR, "0.1.0", &c)
+                .contains(&("CheckUpdates".into(), RegValue::Dword(dword))));
+        }
+        c.check_updates = None;
+        assert!(!machine_state(DIR, "0.1.0", &c)
+            .iter()
+            .any(|(k, _)| k == "CheckUpdates"));
+    }
+
+    /// The self-updater runs `setup --silent` (the settings window's
+    /// update flow): an upgrade must keep the user's "no" (and "yes").
+    #[test]
+    fn silent_self_update_keeps_the_updates_answer() {
+        let args = crate::cli::parse(["--silent"]).unwrap();
+        let crate::cli::Command::Install(args) = args.command else {
+            panic!("not an install");
+        };
+        for answer in [false, true] {
+            let prev = PreviousInstall {
+                version: Some("0.1.7".into()),
+                mode: Some(StartMode::Shell),
+                file_search: Some(true),
+                check_updates: Some(answer),
+            };
+            let c = initial_choices(Some(&prev), &args);
+            assert_eq!(c.check_updates, Some(answer));
+            let p = plan(&facts(), &c, &[]);
+            let state = p
+                .iter()
+                .find_map(|s| match s {
+                    Step::WriteMachineState(v) => Some(v),
+                    _ => None,
+                })
+                .unwrap();
+            assert!(state.contains(&("CheckUpdates".into(), RegValue::Dword(answer as u32))));
+        }
     }
 
     #[test]
