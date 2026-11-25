@@ -47,6 +47,7 @@ Logs: `%LOCALAPPDATA%\explorer-rs\logs\`.
 
 - [Architecture](docs/ARCHITECTURE.md) and [design decisions](docs/decisions/)
 - [Status](docs/STATUS.md) and [testing on Windows](docs/TESTING-ON-WINDOWS.md)
+- [Resource use](docs/PERFORMANCE.md)
 - [Installing](docs/INSTALL.md), [packaging](docs/PACKAGING.md),
   [recovery](docs/RECOVERY.md), [shell mode](docs/SHELL-MODE.md)
 - [Taskbar](docs/TASKBAR.md), [Start menu](docs/START-MENU.md),
