@@ -80,6 +80,35 @@ pub const SHELL_PROCESSES: &[&str] = &[
     "explorer-rs-indexd.exe",
 ];
 
+/// The elevated file-search helper (a logon scheduled task registered by
+/// setup). It is not part of the shell: it only serves the index daemon.
+pub const INDEX_HELPER_EXE: &str = "explorer-rs-index-helper.exe";
+/// Scheduled task that starts [`INDEX_HELPER_EXE`] elevated.
+pub const INDEX_HELPER_TASK: &str = r"\explorer-rs\IndexHelper";
+
+/// What became of the elevated index helper when explorer.rs was stopped
+/// for `--restore-explorer`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelperAfterRestore {
+    /// It was not running: nothing to say.
+    NotRunning,
+    /// It was running and has been stopped.
+    Stopped,
+    /// It is still running (an unelevated process may not be allowed to end
+    /// an elevated task): the user must be told.
+    StillRunning,
+}
+
+/// `running_before`: the helper was running when explorer.rs was stopped;
+/// `running_after`: it still is after asking its task to end.
+pub fn index_helper_after_restore(running_before: bool, running_after: bool) -> HelperAfterRestore {
+    match (running_before, running_after) {
+        (false, false) => HelperAfterRestore::NotRunning,
+        (_, true) => HelperAfterRestore::StillRunning,
+        (true, false) => HelperAfterRestore::Stopped,
+    }
+}
+
 /// True if `image` (file name or full path) is one of [`SHELL_PROCESSES`].
 pub fn is_shell_process(image: &str) -> bool {
     let name = image.rsplit(['\\', '/']).next().unwrap_or(image);
@@ -346,7 +375,7 @@ mod tests {
         ));
         assert!(is_shell_process("explorer-rs-indexd.exe"));
         assert!(!is_shell_process("explorer-rs-setup.exe"));
-        assert!(!is_shell_process("explorer-rs-index-helper.exe"));
+        assert!(!is_shell_process(INDEX_HELPER_EXE));
         assert!(!is_shell_process("explorer.exe"));
     }
 
@@ -448,5 +477,15 @@ mod tests {
             Decision::GiveUp,
             &[1, 2, 3]
         ));
+    }
+
+    #[test]
+    fn index_helper_outcome() {
+        use HelperAfterRestore::*;
+        assert_eq!(index_helper_after_restore(false, false), NotRunning);
+        assert_eq!(index_helper_after_restore(true, false), Stopped);
+        assert_eq!(index_helper_after_restore(true, true), StillRunning);
+        // Started between the two looks: still worth a notice.
+        assert_eq!(index_helper_after_restore(false, true), StillRunning);
     }
 }

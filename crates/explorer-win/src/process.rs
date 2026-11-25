@@ -76,6 +76,14 @@ fn enumerate(keep: impl Fn(u32) -> bool) -> Vec<ProcessInfo> {
     out
 }
 
+/// Is the elevated index helper running in this session?
+pub fn index_helper_running() -> bool {
+    session_processes().iter().any(|p| {
+        p.exe
+            .eq_ignore_ascii_case(explorer_core::guardian::INDEX_HELPER_EXE)
+    })
+}
+
 /// Owner process id of a window (0 if unknown).
 pub fn window_pid(hwnd: HWND) -> u32 {
     let mut pid = 0u32;
@@ -84,7 +92,7 @@ pub fn window_pid(hwnd: HWND) -> u32 {
     pid
 }
 
-fn image_of_window(hwnd: HWND) -> Option<String> {
+pub(crate) fn image_of_window(hwnd: HWND) -> Option<String> {
     let pid = window_pid(hwnd);
     if pid == 0 {
         return None;

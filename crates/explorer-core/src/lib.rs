@@ -42,6 +42,7 @@ pub mod system_glyphs;
 pub mod taskbar_groups;
 pub mod taskbar_layout;
 pub mod taskbar_model;
+pub mod taskbar_restore;
 pub mod textedit;
 pub mod theme;
 pub mod tray;

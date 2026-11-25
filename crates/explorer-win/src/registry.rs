@@ -5,9 +5,9 @@
 use windows::Win32::Foundation::{ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS};
 use windows::Win32::System::Registry::{
     RegCloseKey, RegDeleteValueW, RegEnumValueW, RegGetValueW, RegOpenKeyExW, RegQueryInfoKeyW,
-    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, KEY_WOW64_64KEY,
-    REG_SAM_FLAGS, REG_VALUE_TYPE, RRF_NOEXPAND, RRF_RT_REG_BINARY, RRF_RT_REG_DWORD,
-    RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
+    RegSetValueExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE,
+    KEY_WOW64_64KEY, REG_BINARY, REG_SAM_FLAGS, REG_VALUE_TYPE, RRF_NOEXPAND, RRF_RT_REG_BINARY,
+    RRF_RT_REG_DWORD, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
 };
 
 use crate::util::{from_wide, WideString};
@@ -236,4 +236,14 @@ pub fn delete_value(root: Root, subkey: &str, name: &str) -> bool {
     // SAFETY: valid key and name.
     let r = unsafe { RegDeleteValueW(key.0, n.pcwstr()) };
     r.is_ok() || r == windows::Win32::Foundation::ERROR_FILE_NOT_FOUND
+}
+
+/// Write a REG_BINARY value into an existing key. Returns true on success.
+pub fn write_binary(root: Root, subkey: &str, name: &str, data: &[u8]) -> bool {
+    let Some(key) = open(root, subkey, KEY_SET_VALUE) else {
+        return false;
+    };
+    let n = WideString::new(name);
+    // SAFETY: valid key and name; `data` outlives the call.
+    unsafe { RegSetValueExW(key.0, n.pcwstr(), None, REG_BINARY, Some(data)) }.is_ok()
 }

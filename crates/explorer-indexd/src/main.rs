@@ -121,17 +121,14 @@ fn run_daemon(config: &Config, paths: &AppPaths) -> i32 {
             .spawn(move || server::serve(d, listener))
             .expect("spawn server thread")
     };
-    let interval = config.index.snapshot_interval_s;
-    let snapshot_every = Duration::from_secs(if interval == 0 { 3600 } else { interval });
-    let tick = snapshot_every.min(daemon::HELPER_RETRY);
-    let mut last_snapshot = std::time::Instant::now();
-    while !d.stop.sleep(tick) {
-        d.retry_helper();
-        if interval > 0 && last_snapshot.elapsed() >= snapshot_every {
-            last_snapshot = std::time::Instant::now();
-            if let Err(e) = d.save_snapshot(false) {
-                tracing::error!(error = %e, "periodic snapshot failed");
-            }
+    let mut last_helper_retry = std::time::Instant::now();
+    while !d.stop.sleep(daemon::SNAPSHOT_CHECK) {
+        if last_helper_retry.elapsed() >= daemon::HELPER_RETRY {
+            last_helper_retry = std::time::Instant::now();
+            d.retry_helper();
+        }
+        if let Err(e) = d.save_snapshot_if_due() {
+            tracing::error!(error = %e, "snapshot failed");
         }
     }
     tracing::info!("index daemon stopping");

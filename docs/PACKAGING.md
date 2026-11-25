@@ -100,6 +100,14 @@ nothing, so Linux builds and tests are unaffected.
 
 Check a build with `llvm-readobj --coff-resources <exe>`.
 
+## C runtime
+
+The MSVC binaries link the C runtime statically (`.cargo/config.toml`,
+`-C target-feature=+crt-static`; [ADR 0015](decisions/0015-static-crt.md)),
+so they run on a clean Windows without the Visual C++ Redistributable. After
+a release build, `dumpbin /dependents <exe>` must not list `VCRUNTIME*`,
+`MSVCP*` or `api-ms-win-crt-*`.
+
 ## Releases
 
 `.github/workflows/release.yml` runs on every pushed tag `v<version>` (and
