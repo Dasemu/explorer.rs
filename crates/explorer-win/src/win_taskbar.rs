@@ -20,6 +20,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowExW, IsWindowVisible, ShowWindow, SW_HIDE, SW_SHOWNA,
 };
 
+use explorer_core::taskbar_restore::{
+    plan_restore, settings_autohide, settings_with_autohide, state_may_be_removed, RestoreAction,
+    RestoreInput,
+};
+
 use crate::util::WideString;
 
 const PRIMARY: &str = "Shell_TrayWnd";
@@ -28,11 +33,14 @@ const SECONDARY: &str = "Shell_SecondaryTrayWnd";
 const ABS_AUTOHIDE: usize = 0x1;
 const ABS_ALWAYSONTOP: usize = 0x2;
 
-/// Windows of `class` that belong to another process (not our own tray
-/// host, which also creates a `Shell_TrayWnd` in dev mode).
+/// Windows of `class` that belong to `explorer.exe`. Our own tray host also
+/// creates a `Shell_TrayWnd` (in dev mode and in shell mode) in the taskbar
+/// process, which is never the caller, so ruling out only the caller's own
+/// windows is not enough: a restore run from another process (the
+/// supervisor, `--restore-explorer`, the guardian) would take our tray host
+/// for Explorer's taskbar.
 fn windows_of(class: &str) -> Vec<HWND> {
     let c = WideString::new(class);
-    let me = std::process::id();
     let mut out = Vec::new();
     let mut prev: Option<HWND> = None;
     loop {
@@ -42,7 +50,10 @@ fn windows_of(class: &str) -> Vec<HWND> {
         if h.is_invalid() {
             break;
         }
-        if crate::process::window_pid(h) != me {
+        if crate::process::image_of_window(h)
+            .as_deref()
+            .is_some_and(explorer_core::guardian::is_explorer_image)
+        {
             out.push(h);
         }
         prev = Some(h);
@@ -133,24 +144,73 @@ pub fn reassert_hidden() {
 
 /// Bring Windows' taskbar back with its saved auto-hide state, if we hid
 /// it (state file present). Safe to call from any process, any time.
+///
+/// With Explorer running its taskbar is asked; without it (shell mode, or
+/// before `explorer.exe` is started by `--restore-explorer` / uninstall) the
+/// setting is written to the registry, where Explorer reads it on start.
+/// The state file is removed only once the setting reads back as restored.
 pub fn restore(state_file: &Path) {
-    let Some(was) = read_saved(state_file) else {
-        return;
+    let primary = windows_of(PRIMARY).first().copied();
+    let registry = read_settings();
+    let action = plan_restore(RestoreInput {
+        saved_autohide: read_saved(state_file),
+        explorer_taskbar_present: primary.is_some(),
+        registry_autohide: registry.as_deref().and_then(settings_autohide),
+    });
+    let confirmed = match action {
+        RestoreAction::Nothing => return,
+        RestoreAction::Defer => {
+            tracing::warn!("cannot restore Windows' taskbar yet (no Explorer, no registry value); keeping the saved state");
+            return;
+        }
+        RestoreAction::AlreadyRestored => None,
+        RestoreAction::ViaExplorer { autohide } => {
+            let Some(primary) = primary else { return };
+            let current = state(primary);
+            set_state(
+                primary,
+                (current & ABS_ALWAYSONTOP) | if autohide { ABS_AUTOHIDE } else { 0 },
+            );
+            for h in explorer_taskbars() {
+                // SAFETY: plain call on a foreign window.
+                let _ = unsafe { ShowWindow(h, SW_SHOWNA) };
+            }
+            Some(state(primary) & ABS_AUTOHIDE != 0)
+        }
+        RestoreAction::WriteRegistry { autohide } => {
+            let ok = registry
+                .as_deref()
+                .and_then(|b| settings_with_autohide(b, autohide))
+                .is_some_and(|b| write_settings(&b));
+            if !ok {
+                tracing::warn!("cannot write Windows' taskbar settings");
+            }
+            read_settings().as_deref().and_then(settings_autohide)
+        }
     };
-    let Some(&primary) = windows_of(PRIMARY).first() else {
-        // Explorer is not running: keep the file, the next restore (once
-        // Explorer is back) still knows the user's setting.
-        return;
-    };
-    let current = state(primary);
-    let s = (current & ABS_ALWAYSONTOP) | if was { ABS_AUTOHIDE } else { 0 };
-    set_state(primary, s);
-    for h in explorer_taskbars() {
-        // SAFETY: plain call on a foreign window.
-        let _ = unsafe { ShowWindow(h, SW_SHOWNA) };
+    if state_may_be_removed(action, confirmed) {
+        let _ = std::fs::remove_file(state_file);
+        tracing::info!(?action, "Windows' taskbar restored");
+    } else {
+        tracing::warn!(
+            ?action,
+            ?confirmed,
+            "Windows' taskbar not confirmed restored; keeping the saved state"
+        );
     }
-    let _ = std::fs::remove_file(state_file);
-    tracing::info!(autohide = was, "Windows' taskbar restored");
+}
+
+fn read_settings() -> Option<Vec<u8>> {
+    crate::registry::read_binary(crate::registry::Root::CurrentUser, STUCK_RECTS, "Settings")
+}
+
+fn write_settings(data: &[u8]) -> bool {
+    crate::registry::write_binary(
+        crate::registry::Root::CurrentUser,
+        STUCK_RECTS,
+        "Settings",
+        data,
+    )
 }
 
 /// Where Explorer keeps the taskbar's settings; byte 8, bit 0 of the
@@ -170,9 +230,10 @@ pub fn system_autohide(state_file: &Path) -> bool {
     if let Some(&primary) = windows_of(PRIMARY).first() {
         return state(primary) & ABS_AUTOHIDE != 0;
     }
-    crate::registry::read_binary(crate::registry::Root::CurrentUser, STUCK_RECTS, "Settings")
-        .and_then(|b| b.get(8).copied())
-        .is_some_and(|b| b & 0x01 != 0)
+    read_settings()
+        .as_deref()
+        .and_then(settings_autohide)
+        .unwrap_or(false)
 }
 
 /// While we hide Windows' taskbar we keep it on auto-hide, and the user's

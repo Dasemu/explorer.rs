@@ -41,7 +41,12 @@ already owns a key combination, registration fails and an error is written to
 With `[taskbar] hide_windows_taskbar = true` (default) explorer.rs hides
 Windows' taskbar while its own runs. Before changing anything it writes
 `%LOCALAPPDATA%\explorer-rs\state\windows-taskbar.toml` with the previous
-auto-hide setting; that file exists exactly while the taskbar is hidden.
+auto-hide setting; that file exists exactly while the taskbar is hidden
+and is only removed once the setting is confirmed to be back. With Explorer
+running the setting is restored through Explorer's taskbar; without it (shell
+mode, or right before `--restore-explorer` / the uninstaller start
+`explorer.exe`) it is written to `StuckRects3` in the registry, where Explorer
+reads it when it starts.
 It is restored by the taskbar on exit, by the supervisor when the taskbar
 stops for good or the supervisor exits, by the guardian when it ends, by
 `--restore-explorer` and by Ctrl+Alt+Shift+E. By hand: Settings ->

@@ -80,6 +80,12 @@ impl WinHost {
             SysEvent::QueryEndSession => {}
             SysEvent::SessionEnding => {
                 s.ending.store(true, Ordering::SeqCst);
+                // The taskbar that would restore Windows' own one may be
+                // killed before it gets to (and in shell mode there is no
+                // Explorer to ask): put the setting back now.
+                explorer_win::win_taskbar::restore(
+                    &explorer_core::paths::AppPaths::from_env().windows_taskbar_state_file(),
+                );
                 if s.shell {
                     s.with_state(|st| st.mark_session_end(unix_now()));
                 }
