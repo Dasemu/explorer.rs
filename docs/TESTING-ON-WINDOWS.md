@@ -113,7 +113,7 @@ Only in a VM with a snapshot, with a second admin account and [RECOVERY.md](RECO
 63. **Crash loop, No.** Temporarily rename `explorer-rs-taskbar.exe` and sign in: after ~3 failures a bilingual Yes/No dialog appears. Choose No: explorer.exe starts. Sign out/in twice more choosing No: on the third failure Windows Explorer is restored automatically with an explanation. Rename the file back and re-register shell mode.
 64. **Crash loop, Yes.** Repeat the failure and choose Yes: Windows Explorer becomes the shell (full taskbar) and the next sign-in uses explorer.exe. Re-register shell mode.
 65. **Clean sign-out.** Sign out and shut down normally several times: no component crash events in `--status` and the failed sign-in counter stays 0.
-66. **Restore Explorer.** Start menu -> "Restore Windows Explorer" (or `explorer-rs.exe --restore-explorer`): explorer.rs stops, explorer.exe starts, a confirmation box appears. Sign out/in: the normal desktop returns. Fallback: Task Manager -> Run new task -> `powershell -ExecutionPolicy Bypass -File <path>\scripts\restore-explorer.ps1 -StartExplorer`.
+66. **Restore Explorer.** Start menu -> "Restore Windows Explorer" (or `explorer-rs.exe --restore-explorer`): explorer.rs stops, explorer.exe starts, a confirmation box appears. Sign out/in: the normal desktop returns. Fallback: Task Manager -> Run new task -> `powershell -ExecutionPolicy Bypass -File <path>\scripts\restore-explorer.ps1 -StartExplorer`. With the fast file search helper installed, `explorer-rs-index-helper.exe` is gone from Task Manager afterwards; if Windows refuses to end it, the confirmation box says it is still running and how to end it.
 
 ## Phase D: File search
 

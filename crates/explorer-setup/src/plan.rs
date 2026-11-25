@@ -17,7 +17,7 @@ use crate::task_xml;
 /// non-administrators cannot replace (ADR 0010).
 pub const INSTALL_DIR_NAME: &str = "explorer-rs";
 pub const SUPERVISOR_EXE: &str = "explorer-rs.exe";
-pub const INDEX_HELPER_EXE: &str = "explorer-rs-index-helper.exe";
+pub const INDEX_HELPER_EXE: &str = explorer_core::guardian::INDEX_HELPER_EXE;
 pub const SETUP_EXE: &str = "explorer-rs-setup.exe";
 /// Copy of the setup program kept in the install folder for Add/Remove
 /// Programs.

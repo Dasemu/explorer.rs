@@ -297,6 +297,7 @@ pub fn restore_explorer_command(console: bool) -> i32 {
     }
 
     let mut start_failed = false;
+    let mut helper = explorer_core::guardian::HelperAfterRestore::NotRunning;
     if !process::explorer_shell_running() {
         // explorer.rs is the shell: stop it, then start Windows Explorer.
         if !process::explorer_path().exists() {
@@ -304,6 +305,7 @@ pub fn restore_explorer_command(console: bool) -> i32 {
             start_failed = true;
         } else {
             stop_explorer_rs(guardian_pid);
+            helper = stop_index_helper();
             if process::start_explorer().is_err() {
                 start_failed = true;
                 // Never leave an empty screen: bring explorer.rs back.
@@ -353,12 +355,47 @@ pub fn restore_explorer_command(console: bool) -> i32 {
             )
         }
     };
+    let text = if helper == explorer_core::guardian::HelperAfterRestore::StillRunning {
+        format!(
+            "{text}
+
+{}",
+            tr(
+                lang,
+                "The fast file search helper (explorer-rs-index-helper.exe, running with administrator rights) is still running. It does nothing without explorer.rs; end it in Task Manager (Details tab) or run `schtasks /End /TN \\explorer-rs\\IndexHelper` as administrator.",
+                "El asistente de búsqueda rápida de archivos (explorer-rs-index-helper.exe, con permisos de administrador) sigue en ejecución. No hace nada sin explorer.rs; ciérralo en el Administrador de tareas (pestaña Detalles) o ejecuta `schtasks /End /TN \\explorer-rs\\IndexHelper` como administrador.",
+            )
+        )
+    } else {
+        text.to_string()
+    };
     if console {
         println!("{text}");
     } else {
-        dialog::info(CAPTION, text);
+        dialog::info(CAPTION, &text);
     }
     code
+}
+
+/// The elevated index helper outlives explorer.rs (it is its own logon
+/// task). Ask its task to end and report whether it is gone: an unelevated
+/// caller may be refused, in which case the user is told.
+fn stop_index_helper() -> explorer_core::guardian::HelperAfterRestore {
+    let before = process::index_helper_running();
+    if before {
+        match explorer_win::sched::end(explorer_core::guardian::INDEX_HELPER_TASK) {
+            Ok(()) => tracing::info!("asked the index helper task to end"),
+            Err(e) => tracing::warn!(error = %e, "cannot end the index helper task"),
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline && process::index_helper_running() {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    let after = process::index_helper_running();
+    let outcome = explorer_core::guardian::index_helper_after_restore(before, after);
+    tracing::info!(?outcome, "index helper after restore");
+    outcome
 }
 
 /// Record the restore in the crash log. While a guardian runs it is the

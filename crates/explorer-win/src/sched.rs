@@ -114,3 +114,14 @@ pub fn run_now(name: &str) -> Result<()> {
     }
     Ok(())
 }
+
+/// Ask a running task to end. Not an error if it is not running; an
+/// unelevated caller may be refused for an elevated task, which the error
+/// reports.
+pub fn end(name: &str) -> Result<()> {
+    let out = run(&["/End", "/TN", name])?;
+    if !out.status.success() {
+        bail!(fail("/End", &out));
+    }
+    Ok(())
+}
