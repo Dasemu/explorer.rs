@@ -26,7 +26,11 @@ animations = true
 # available, show a small reminder next to the clock every few days.
 # Nothing is ever installed without asking: updating is a button
 # (in the reminder or in Settings > Updates). false = never check.
-check_updates = true
+# Left out on purpose: without this key, the answer you gave in the
+# installer ("Check for updates automatically?") applies, and true when
+# there is none (portable copy, or a silent install without --updates=).
+# Uncomment to override the installer's answer.
+# check_updates = true
 
 [taskbar]
 # Screen edge: "bottom" or "top".

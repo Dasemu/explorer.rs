@@ -81,11 +81,16 @@ pub fn previous_install() -> Option<PreviousInstall> {
     let mode =
         reg::get_string(Root::Hklm, MACHINE_KEY, VALUE_MODE).and_then(|m| StartMode::parse(&m));
     let file_search = reg::get_dword(Root::Hklm, MACHINE_KEY, VALUE_FILE_SEARCH).map(|v| v != 0);
-    (version.is_some() || mode.is_some() || file_search.is_some()).then_some(PreviousInstall {
-        version,
-        mode,
-        file_search,
-    })
+    // Absent for installs made before the installer asked about updates.
+    let check_updates =
+        reg::get_dword(Root::Hklm, MACHINE_KEY, VALUE_CHECK_UPDATES).map(|v| v != 0);
+    (version.is_some() || mode.is_some() || file_search.is_some() || check_updates.is_some())
+        .then_some(PreviousInstall {
+            version,
+            mode,
+            file_search,
+            check_updates,
+        })
 }
 
 /// Files recorded by the previous install (empty if none).

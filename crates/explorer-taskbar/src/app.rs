@@ -822,7 +822,9 @@ fn auto_hide_wanted(setting: AutoHide, state_file: &std::path::Path) -> bool {
 impl Controller {
     /// Timer: start the daily check if due, else see whether to remind.
     fn update_tick(&mut self) {
-        if !self.shared.config.general.check_updates || self.update_checking {
+        if !explorer_win::update::check_updates_enabled(&self.shared.config.general)
+            || self.update_checking
+        {
             return;
         }
         let state = UpdateState::load(&self.update_state_file);
@@ -852,7 +854,7 @@ impl Controller {
         let now = update::unix_now();
         let current = update::Version::current();
         let ctx = update::RemindContext {
-            enabled: self.shared.config.general.check_updates,
+            enabled: explorer_win::update::check_updates_enabled(&self.shared.config.general),
             shown_this_session: self.update_shown || update_toast::is_shown(&self.shared),
             fullscreen: !self.shared.fullscreen.borrow().is_empty(),
         };
@@ -1217,7 +1219,7 @@ impl Handler for Controller {
                     SetTimer(Some(hwnd), TIMER_CLOCK, 1000, None);
                     SetTimer(Some(hwnd), TIMER_RESYNC, RESYNC_MS, None);
                     SetTimer(Some(hwnd), TIMER_FULLSCREEN, FULLSCREEN_CHECK_MS, None);
-                    if self.shared.config.general.check_updates {
+                    if explorer_win::update::check_updates_enabled(&self.shared.config.general) {
                         SetTimer(Some(hwnd), TIMER_UPDATE, UPDATE_FIRST_MS, None);
                     }
                 }

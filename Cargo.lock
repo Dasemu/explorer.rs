@@ -355,7 +355,7 @@ dependencies = [
 
 [[package]]
 name = "explorer-core"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "criterion",
@@ -373,7 +373,7 @@ dependencies = [
 
 [[package]]
 name = "explorer-desktop"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "clap",
@@ -384,7 +384,7 @@ dependencies = [
 
 [[package]]
 name = "explorer-index"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "crc32fast",
@@ -403,7 +403,7 @@ dependencies = [
 
 [[package]]
 name = "explorer-index-client"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "explorer-index",
  "tempfile",
@@ -412,7 +412,7 @@ dependencies = [
 
 [[package]]
 name = "explorer-indexd"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "clap",
@@ -426,7 +426,7 @@ dependencies = [
 
 [[package]]
 name = "explorer-launcher"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "clap",
@@ -438,7 +438,7 @@ dependencies = [
 
 [[package]]
 name = "explorer-setup"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "explorer-core",
@@ -453,7 +453,7 @@ dependencies = [
 
 [[package]]
 name = "explorer-supervisor"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "clap",
@@ -467,7 +467,7 @@ dependencies = [
 
 [[package]]
 name = "explorer-taskbar"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "clap",
@@ -478,7 +478,7 @@ dependencies = [
 
 [[package]]
 name = "explorer-win"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "explorer-core",

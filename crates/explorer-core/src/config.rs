@@ -50,7 +50,32 @@ pub struct GeneralConfig {
     pub animations: bool,
     /// Look for a new explorer.rs release once a day and remind the user
     /// (every few days) while one is available. Never installs by itself.
-    pub check_updates: bool,
+    /// `None` (key absent) defers to the answer given in the installer; use
+    /// [`GeneralConfig::check_updates_with`] for the effective value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_updates: Option<bool>,
+}
+
+/// The app's built-in answer to "check for updates automatically?", used
+/// when neither config.toml nor the installer says otherwise (portable
+/// copies, installs from before the installer asked, silent installs
+/// without `--updates=`).
+pub const DEFAULT_CHECK_UPDATES: bool = true;
+
+/// Effective "check for updates": the user's explicit config key wins,
+/// else the installer's recorded answer, else [`DEFAULT_CHECK_UPDATES`].
+/// The installer runs elevated and cannot write the per-user config, so
+/// its answer lives in HKLM and is only a default.
+pub fn resolve_check_updates(user: Option<bool>, installer: Option<bool>) -> bool {
+    user.or(installer).unwrap_or(DEFAULT_CHECK_UPDATES)
+}
+
+impl GeneralConfig {
+    /// Effective `check_updates`, given the installer's answer (read from
+    /// the registry by the Windows layer).
+    pub fn check_updates_with(&self, installer: Option<bool>) -> bool {
+        resolve_check_updates(self.check_updates, installer)
+    }
 }
 
 impl Default for GeneralConfig {
@@ -61,7 +86,7 @@ impl Default for GeneralConfig {
             theme: ThemeMode::System,
             language: crate::i18n::LanguageSetting::System,
             animations: true,
-            check_updates: true,
+            check_updates: None,
         }
     }
 }
@@ -525,6 +550,34 @@ mod tests {
         assert!(DesktopMode::Shell.enabled_in(crate::ipc::RunMode::Shell));
         assert!(!DesktopMode::Never.enabled_in(crate::ipc::RunMode::Shell));
         assert!(Config::from_toml("[desktop]\nenabled = \"yes\"\n").is_err());
+    }
+
+    #[test]
+    fn check_updates_resolution() {
+        // Explicit config key wins over the installer's answer.
+        assert!(resolve_check_updates(Some(true), Some(false)));
+        assert!(!resolve_check_updates(Some(false), Some(true)));
+        assert!(!resolve_check_updates(Some(false), None));
+        // No key: the installer's answer.
+        assert!(!resolve_check_updates(None, Some(false)));
+        assert!(resolve_check_updates(None, Some(true)));
+        // Neither: the built-in default.
+        assert_eq!(resolve_check_updates(None, None), DEFAULT_CHECK_UPDATES);
+        // Documented (INSTALL.md, default.toml) as "on".
+        const { assert!(DEFAULT_CHECK_UPDATES) };
+
+        // The documented default leaves the key out, so the installer decides.
+        assert_eq!(Config::default().general.check_updates, None);
+        let c = Config::from_toml("[general]\ncheck_updates = false\n").unwrap();
+        assert_eq!(c.general.check_updates, Some(false));
+        assert!(!c.general.check_updates_with(Some(true)));
+        assert!(!Config::default().general.check_updates_with(Some(false)));
+        // An absent key is not serialized (the settings window relies on
+        // that to tell "explicit" from "inherited").
+        let v = toml::Value::try_from(Config::default()).unwrap();
+        assert!(v["general"].get("check_updates").is_none());
+        let v = toml::Value::try_from(&c).unwrap();
+        assert_eq!(v["general"]["check_updates"].as_bool(), Some(false));
     }
 
     #[test]

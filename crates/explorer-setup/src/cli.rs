@@ -25,6 +25,8 @@ pub struct InstallArgs {
     pub mode: Option<StartMode>,
     pub file_search: Option<bool>,
     pub no_launch: bool,
+    /// `--updates=on|off`: answer to "Check for updates automatically?".
+    pub check_updates: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -73,6 +75,9 @@ Install (default):
   --mode=alongside|shell|none
                             start mode (default: shell, or the previous choice)
   --file-search=on|off      fast file search helper (default: on, or previous)
+  --updates=on|off          check GitHub daily for new versions (default: the
+                            previous answer; on for a first silent install;
+                            the wizard asks when there is no previous answer)
   --no-launch               do not start explorer.rs at the end
 
 Uninstall:
@@ -85,6 +90,14 @@ Other:
   --help, /?                this text
 
 Exit codes: 0 ok, 1 error, 2 cancelled, 3 ok but a reboot is required.";
+
+fn on_off(v: &str) -> Option<bool> {
+    match v.to_ascii_lowercase().as_str() {
+        "on" | "1" | "true" | "yes" => Some(true),
+        "off" | "0" | "false" | "no" => Some(false),
+        _ => None,
+    }
+}
 
 /// Parse arguments (without the program name).
 pub fn parse<I, S>(args: I) -> Result<Cli, CliError>
@@ -138,11 +151,17 @@ where
             }
             "--file-search" => {
                 let v = value("--file-search")?;
-                install.file_search = Some(match v.to_ascii_lowercase().as_str() {
-                    "on" | "1" | "true" | "yes" => true,
-                    "off" | "0" | "false" | "no" => false,
-                    _ => return Err(CliError::BadValue("--file-search".into(), v)),
-                });
+                install.file_search = Some(
+                    on_off(&v)
+                        .ok_or_else(|| CliError::BadValue("--file-search".into(), v.clone()))?,
+                );
+                install_only.get_or_insert(key.clone());
+            }
+            "--updates" => {
+                let v = value("--updates")?;
+                install.check_updates = Some(
+                    on_off(&v).ok_or_else(|| CliError::BadValue("--updates".into(), v.clone()))?,
+                );
                 install_only.get_or_insert(key.clone());
             }
             "--no-launch" => {
@@ -230,6 +249,7 @@ mod tests {
                 mode: Some(StartMode::Shell),
                 file_search: Some(false),
                 no_launch: true,
+                check_updates: None,
             })
         );
         let c = p(&["/SILENT", "--MODE=None", "--file-search=ON"]).unwrap();
@@ -240,8 +260,34 @@ mod tests {
                 mode: Some(StartMode::None),
                 file_search: Some(true),
                 no_launch: false,
+                check_updates: None,
             })
         );
+        for (arg, on) in [
+            ("--updates=off", false),
+            ("--updates=ON", true),
+            ("/updates=no", false),
+        ] {
+            let c = p(&["--silent", arg]).unwrap();
+            assert_eq!(
+                c.command,
+                Command::Install(InstallArgs {
+                    silent: true,
+                    check_updates: Some(on),
+                    ..Default::default()
+                })
+            );
+        }
+        let c = p(&["--updates", "on"]).unwrap();
+        assert!(matches!(
+            c.command,
+            Command::Install(InstallArgs {
+                check_updates: Some(true),
+                silent: false,
+                ..
+            })
+        ));
+        assert!(USAGE.contains("--updates=on|off"));
     }
 
     #[test]
@@ -295,6 +341,18 @@ mod tests {
         );
         assert!(matches!(
             p(&["--uninstall", "--mode=shell"]),
+            Err(CliError::Conflict(..))
+        ));
+        assert_eq!(
+            p(&["--updates=maybe"]),
+            Err(CliError::BadValue("--updates".into(), "maybe".into()))
+        );
+        assert_eq!(
+            p(&["--updates"]),
+            Err(CliError::MissingValue("--updates".into()))
+        );
+        assert!(matches!(
+            p(&["--uninstall", "--updates=off"]),
             Err(CliError::Conflict(..))
         ));
         assert!(matches!(
