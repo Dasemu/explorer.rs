@@ -142,9 +142,13 @@ parent folder the daemon cannot list are dropped (cached per folder).
 Snapshot: versioned header with CRC-32 of header and body, entries in
 pre-order with backward parent deltas, per-volume journal positions. Written to
 `index.tmp`, fsynced, renamed over `index.snapshot`; encoded under the read
-lock, written without it. Saved every `snapshot_interval_s` when changed and on
-clean shutdown. On load, any error (truncation, bit flip, wrong version,
-inconsistent structure) moves the file to `index.bad` and the index is rebuilt.
+lock, written without it. Saved every `snapshot_interval_s` when changed, on
+clean shutdown, and shortly after a root finishes its scan (at most once per
+30 s; decided by the pure function `snapshot_due`), so a daemon that dies
+before the first periodic snapshot does not rebuild from scratch.
+`snapshot_interval_s = 0` disables the periodic and the early snapshot. On
+load, any error (truncation, bit flip, wrong version, inconsistent structure)
+moves the file to `index.bad` and the index is rebuilt.
 After a crash or kill the daemon restarts from the last snapshot and catches up
 from the journal (the snapshot never contains a journal position newer than the
 index state it was taken with, because both change in the same batch under the
