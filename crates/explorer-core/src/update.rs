@@ -28,13 +28,18 @@ use sha2::{Digest, Sha256};
 use crate::i18n::{tr, trf, Lang};
 
 /// The only repository updates are taken from.
-pub const REPO: &str = "Dasemu/explorer.rs";
+pub const REPO: &str = "FerroApps/explorer.rs";
 /// GitHub API: the newest published, non-draft, non-prerelease release.
-pub const LATEST_URL: &str = "https://api.github.com/repos/Dasemu/explorer.rs/releases/latest";
+pub const LATEST_URL: &str = "https://api.github.com/repos/FerroApps/explorer.rs/releases/latest";
 /// Human-readable list of releases (fallback when installing fails).
-pub const RELEASES_PAGE: &str = "https://github.com/Dasemu/explorer.rs/releases";
-/// Every accepted asset URL starts with this, followed by `<tag>/<name>`.
-const DOWNLOAD_PREFIX: &str = "https://github.com/Dasemu/explorer.rs/releases/download/";
+pub const RELEASES_PAGE: &str = "https://github.com/FerroApps/explorer.rs/releases";
+/// Every accepted asset URL starts with one of these, followed by
+/// `<tag>/<name>`. The repository moved from Dasemu to FerroApps; GitHub
+/// redirects the old name, and release JSON may name either owner.
+const DOWNLOAD_PREFIXES: &[&str] = &[
+    "https://github.com/FerroApps/explorer.rs/releases/download/",
+    "https://github.com/Dasemu/explorer.rs/releases/download/",
+];
 pub const SUMS_NAME: &str = "SHA256SUMS.txt";
 
 /// Size limits for what is downloaded. The installer is a few tens of MB;
@@ -188,8 +193,13 @@ pub fn parse_release(json: &str) -> Result<Release, ReleaseError> {
             .iter()
             .find(|a| a.name == name)
             .ok_or_else(|| ReleaseError::MissingAsset(name.to_string()))?;
-        let expected = format!("{DOWNLOAD_PREFIX}{tag}/{name}");
-        if a.browser_download_url != expected {
+        let suffix = format!("{tag}/{name}");
+        let url_ok = DOWNLOAD_PREFIXES.iter().any(|p| {
+            a.browser_download_url
+                .strip_prefix(p)
+                .is_some_and(|rest| rest == suffix)
+        });
+        if !url_ok {
             return Err(ReleaseError::BadUrl(name.to_string()));
         }
         if a.size == 0 || a.size > max {
@@ -561,12 +571,21 @@ mod tests {
         assert_eq!(r.tag, "v0.1.7");
         assert_eq!(
             r.page,
-            "https://github.com/Dasemu/explorer.rs/releases/tag/v0.1.7"
+            "https://github.com/FerroApps/explorer.rs/releases/tag/v0.1.7"
         );
         assert_eq!(r.setup.name, "explorer-rs-setup-0.1.7-x64.exe");
         assert_eq!(r.setup.size, 1234);
         assert_eq!(r.sums.name, SUMS_NAME);
         assert_eq!(r.notes, "• Taskbar: faster start\n• Fix tray icons");
+    }
+
+    #[test]
+    fn assets_from_the_moved_repository_are_accepted() {
+        // The repository moved from Dasemu to FerroApps; both owners' URLs
+        // are the project's own.
+        let moved = release_json("v0.1.7", "explorer-rs-setup-0.1.7-x64.exe", "v0.1.7", "")
+            .replace("Dasemu/explorer.rs", "FerroApps/explorer.rs");
+        assert!(parse_release(&moved).is_ok());
     }
 
     #[test]

@@ -18,7 +18,7 @@ Before you start:
 ## 1. Installer (recommended)
 
 Download `explorer-rs-setup-<version>-x64.exe` from the
-[GitHub Releases](https://github.com/Dasemu/explorer.rs/releases) page
+[GitHub Releases](https://github.com/FerroApps/explorer.rs/releases) page
 (`SHA256SUMS.txt` next to it has the checksums) and run it. It asks for administrator rights
 (UAC), then:
 
@@ -105,7 +105,7 @@ Windows asks for administrator permission. A silent upgrade keeps the start
 mode, the fast file search choice and all your settings; explorer.rs is
 stopped and started again. If the permission prompt is refused or does not
 appear, the downloaded installer stays in that folder: run it yourself, or
-get it from the [releases page](https://github.com/Dasemu/explorer.rs/releases).
+get it from the [releases page](https://github.com/FerroApps/explorer.rs/releases).
 A portable copy is not updated in place; it is sent to the releases page.
 
 ### Uninstall

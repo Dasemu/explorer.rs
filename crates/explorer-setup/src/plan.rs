@@ -29,7 +29,7 @@ pub const FILE_MANIFEST: &str = "install-manifest.txt";
 pub const START_MENU_FOLDER: &str = "explorer.rs";
 /// Add/Remove Programs key under HKLM.
 pub const ARP_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\explorer-rs";
-pub const URL_INFO_ABOUT: &str = "https://github.com/Dasemu/explorer.rs";
+pub const URL_INFO_ABOUT: &str = "https://github.com/FerroApps/explorer.rs";
 pub const PUBLISHER: &str = "explorer.rs contributors";
 
 /// Arguments of the "Restore Windows Explorer" shortcut target

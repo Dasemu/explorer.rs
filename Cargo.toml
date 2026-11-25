@@ -19,7 +19,7 @@ exclude = ["fuzz"]
 version = "0.1.7"
 edition = "2021"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/Dasemu/explorer.rs"
+repository = "https://github.com/FerroApps/explorer.rs"
 rust-version = "1.85"
 
 [workspace.dependencies]
