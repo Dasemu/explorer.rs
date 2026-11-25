@@ -530,13 +530,23 @@ impl Bar {
         if self.reserve_lost >= 3 && self.reserve_checks % 15 != 0 {
             return;
         }
-        if self.reserve_lost == 0 {
-            tracing::warn!(
+        // The first loss is routine (it happens on every start, when
+        // Windows' own taskbar gives its space back) and re-reserving fixes
+        // it: info. Only a loss that survives the retry is a warning.
+        match autohide::loss_severity(self.reserve_lost) {
+            Some(autohide::LossSeverity::Expected) => tracing::info!(
                 monitor = %m.describe(),
                 work = ?(m.work.top, m.work.bottom),
                 bar = ?(r.top, r.bottom),
                 "the work area no longer leaves room for the taskbar; reserving it again"
-            );
+            ),
+            Some(autohide::LossSeverity::Persistent) => tracing::warn!(
+                monitor = %m.describe(),
+                work = ?(m.work.top, m.work.bottom),
+                bar = ?(r.top, r.bottom),
+                "reserving the taskbar's space again did not stick; retrying"
+            ),
+            None => {}
         }
         self.reserve_lost += 1;
         if let Some(ab) = self.appbar.as_mut() {

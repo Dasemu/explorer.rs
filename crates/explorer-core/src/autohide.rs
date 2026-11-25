@@ -61,6 +61,26 @@ pub fn reservation_lost(
     }
 }
 
+/// How loudly to log that the work area lost the bar's reserved space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LossSeverity {
+    /// First time: re-reserving normally fixes it (it happens on every start
+    /// while Windows' own taskbar gives its space back), so log at info.
+    Expected,
+    /// Re-reserving did not stick: something keeps resetting the work area.
+    Persistent,
+}
+
+/// Severity of the log line for a lost reservation, given how many
+/// re-reservations were already attempted in this streak.
+pub fn loss_severity(attempts: u32) -> Option<LossSeverity> {
+    match attempts {
+        0 => Some(LossSeverity::Expected),
+        1 => Some(LossSeverity::Persistent),
+        _ => None,
+    }
+}
+
 /// Delays hiding until the bar has not been wanted for [`HIDE_DELAY`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Linger {
@@ -86,6 +106,14 @@ impl Linger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_loss_is_expected_and_only_a_failed_retry_is_loud() {
+        assert_eq!(loss_severity(0), Some(LossSeverity::Expected));
+        assert_eq!(loss_severity(1), Some(LossSeverity::Persistent));
+        assert_eq!(loss_severity(2), None);
+        assert_eq!(loss_severity(50), None);
+    }
 
     #[test]
     fn pointer_shows_the_bar_except_over_full_screen_apps() {
