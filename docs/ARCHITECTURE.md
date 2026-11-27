@@ -97,9 +97,13 @@ button, and why.
 ## Taskbar
 
 - A hidden **controller** window owns the `TaskbarModel`, the shell hooks,
-  the Win-key hook, the clock timer and a 30 s full-resync safety net. It
-  rebuilds the bars on `WM_DISPLAYCHANGE` (debounced) and on `TaskbarCreated`
-  (explorer restarted in dev mode).
+  the Win-key hook, the clock timer and a 30 s full-resync safety net. On
+  `WM_DISPLAYCHANGE` (debounced) it rebuilds the bars only when monitors
+  came or went or the primary changed, and otherwise moves the existing
+  ones (`explorer_core::display`); it also rebuilds them on `TaskbarCreated`
+  (explorer restarted in dev mode). In shell mode it registers Explorer's
+  shortcuts (Win+Shift+S, Print Screen, Win+Print Screen, Win+E/R/I/D/A/N;
+  `explorer_core::shell_keys`).
 - One **bar** window per monitor (`WS_EX_TOOLWINDOW | WS_EX_TOPMOST`), drawn
   with Direct2D/DirectWrite in physical pixels. The scale is the monitor DPI / 96
   (Per-Monitor v2 awareness).

@@ -43,21 +43,53 @@ pub fn offset(thickness: i32, peek: i32, hidden: f32) -> i32 {
     ((thickness - peek).max(0) as f32 * hidden.clamp(0.0, 1.0)).round() as i32
 }
 
-/// Whether the work area (`work_top`..`work_bottom`) of a monitor no
-/// longer leaves room for a bar spanning `bar_top`..`bar_bottom` along its
-/// edge: something (Explorer recomputing it when its own taskbar settings
-/// change, another program) reset it, and apps now draw under the bar.
-pub fn reservation_lost(
+/// How the work area of a monitor relates to the bar along its edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reservation {
+    /// The work area ends exactly where the bar starts.
+    Exact,
+    /// The work area reaches under the bar: something (Explorer recomputing
+    /// it when its own taskbar settings change, another program, a display
+    /// change) reset it, and apps now draw under the bar.
+    Lost,
+    /// The work area stops `px` pixels short of the bar: maximized windows
+    /// leave a strip of desktop between themselves and the bar (a stale,
+    /// larger reservation).
+    Gap { px: i32 },
+}
+
+/// Compare the work area (`work_top`..`work_bottom`) of a monitor with a
+/// bar spanning `bar_top`..`bar_bottom` along its edge.
+pub fn check_reservation(
     work_top: i32,
     work_bottom: i32,
     bar_top: i32,
     bar_bottom: i32,
     bottom_edge: bool,
-) -> bool {
-    if bottom_edge {
-        work_bottom > bar_top
+) -> Reservation {
+    let px = if bottom_edge {
+        bar_top - work_bottom
     } else {
-        work_top < bar_bottom
+        work_top - bar_bottom
+    };
+    match px {
+        0 => Reservation::Exact,
+        p if p < 0 => Reservation::Lost,
+        px => Reservation::Gap { px },
+    }
+}
+
+/// Whether to reserve the bar's space again after `check`.
+///
+/// A lost reservation is always fixed. A gap is fixed only when we own the
+/// work area (shell mode, `owns_work_area`): alongside Explorer, Explorer's
+/// AppBar manager arbitrates it, and its own (hidden) taskbar or another
+/// AppBar may legitimately hold the extra room.
+pub fn should_reserve_again(check: Reservation, owns_work_area: bool) -> bool {
+    match check {
+        Reservation::Exact => false,
+        Reservation::Lost => true,
+        Reservation::Gap { .. } => owns_work_area,
     }
 }
 
@@ -160,15 +192,47 @@ mod tests {
     }
 
     #[test]
-    fn lost_reservations_are_noticed() {
+    fn lost_reservations_and_gaps_are_noticed() {
         // 1080p monitor, 48 px bar at the bottom.
-        assert!(!reservation_lost(0, 1032, 1032, 1080, true));
-        assert!(reservation_lost(0, 1080, 1032, 1080, true));
-        // Explorer's own (hidden) taskbar still reserved: more room is fine.
-        assert!(!reservation_lost(0, 992, 1032, 1080, true));
+        assert_eq!(
+            check_reservation(0, 1032, 1032, 1080, true),
+            Reservation::Exact
+        );
+        assert_eq!(
+            check_reservation(0, 1080, 1032, 1080, true),
+            Reservation::Lost
+        );
+        // A stale 72 px reservation (150 % scale) under a 48 px bar.
+        assert_eq!(
+            check_reservation(0, 1008, 1032, 1080, true),
+            Reservation::Gap { px: 24 }
+        );
         // Top edge.
-        assert!(!reservation_lost(48, 1080, 0, 48, false));
-        assert!(reservation_lost(0, 1080, 0, 48, false));
+        assert_eq!(
+            check_reservation(48, 1080, 0, 48, false),
+            Reservation::Exact
+        );
+        assert_eq!(check_reservation(0, 1080, 0, 48, false), Reservation::Lost);
+        assert_eq!(
+            check_reservation(60, 1080, 0, 48, false),
+            Reservation::Gap { px: 12 }
+        );
+        // Secondary monitor with a negative origin.
+        assert_eq!(
+            check_reservation(-1080, -48, -48, 0, true),
+            Reservation::Exact
+        );
+    }
+
+    #[test]
+    fn gaps_are_fixed_only_where_we_own_the_work_area() {
+        let gap = Reservation::Gap { px: 24 };
+        assert!(should_reserve_again(gap, true));
+        // Alongside Explorer its own (hidden) taskbar may hold more room.
+        assert!(!should_reserve_again(gap, false));
+        assert!(should_reserve_again(Reservation::Lost, false));
+        assert!(should_reserve_again(Reservation::Lost, true));
+        assert!(!should_reserve_again(Reservation::Exact, true));
     }
 
     #[test]

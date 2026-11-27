@@ -6,8 +6,8 @@ use windows::Win32::Foundation::{ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS};
 use windows::Win32::System::Registry::{
     RegCloseKey, RegDeleteValueW, RegEnumValueW, RegGetValueW, RegOpenKeyExW, RegQueryInfoKeyW,
     RegSetValueExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE,
-    KEY_WOW64_64KEY, REG_BINARY, REG_SAM_FLAGS, REG_VALUE_TYPE, RRF_NOEXPAND, RRF_RT_REG_BINARY,
-    RRF_RT_REG_DWORD, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
+    KEY_WOW64_64KEY, REG_BINARY, REG_DWORD, REG_SAM_FLAGS, REG_VALUE_TYPE, RRF_NOEXPAND,
+    RRF_RT_REG_BINARY, RRF_RT_REG_DWORD, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
 };
 
 use crate::util::{from_wide, WideString};
@@ -246,4 +246,25 @@ pub fn write_binary(root: Root, subkey: &str, name: &str, data: &[u8]) -> bool {
     let n = WideString::new(name);
     // SAFETY: valid key and name; `data` outlives the call.
     unsafe { RegSetValueExW(key.0, n.pcwstr(), None, REG_BINARY, Some(data)) }.is_ok()
+}
+
+/// Write a REG_DWORD value into an existing key. Returns true on success.
+pub fn write_dword(root: Root, subkey: &str, name: &str, value: u32) -> bool {
+    let Some(key) = open(root, subkey, KEY_SET_VALUE) else {
+        return false;
+    };
+    let n = WideString::new(name);
+    let data = value.to_le_bytes();
+    // SAFETY: valid key and name; `data` outlives the call.
+    unsafe { RegSetValueExW(key.0, n.pcwstr(), None, REG_DWORD, Some(&data)) }.is_ok()
+}
+
+/// Windows' build number (`CurrentBuildNumber`), e.g. 22631.
+pub fn windows_build() -> Option<u32> {
+    read_string(
+        Root::LocalMachine,
+        r"SOFTWARE\Microsoft\Windows NT\CurrentVersion",
+        "CurrentBuildNumber",
+    )
+    .and_then(|s| s.trim().parse().ok())
 }

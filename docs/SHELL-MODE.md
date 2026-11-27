@@ -69,6 +69,26 @@ Configure it with:
 enabled = "shell"   # "shell" (default), "always" (also in --dev), "never"
 ```
 
+### Provides Explorer's keyboard shortcuts
+Many Win+ shortcuts are not handled by Windows but by explorer.exe, so
+without it they did nothing. In shell mode the taskbar registers these
+(`RegisterHotKey`; alongside Explorer, Explorer keeps handling them):
+
+| Keys | Does |
+|------|------|
+| Win+Shift+S | Screen clip overlay (`ms-screenclip:`, Snipping Tool) |
+| Print Screen | The same, when Settings -> Accessibility -> Keyboard -> "Use the Print screen key to open screen capture" is on (`HKCU\Control Panel\Keyboard\PrintScreenKeyForSnippingEnabled`; missing means on in Windows 11). When it is off the key is left to Windows, which copies the screen to the clipboard |
+| Win+Print Screen | Whole screen (all monitors) to `Pictures\Screenshots\Screenshot (N).png` ("Captura de pantalla (N).png" in Spanish; N continues Windows' `ScreenshotIndex` counter) and to the clipboard. The screen is not dimmed |
+| Win+E | A File Explorer window (as the Start menu's File Explorer button) |
+| Win+R | The Start menu, whose search box runs commands (there is no Run dialog) |
+| Win+I | Settings |
+| Win+D | Show desktop / bring the windows back |
+| Win+A | Quick settings |
+| Win+N | The calendar (there is no notification centre) |
+
+A shortcut another program already holds is skipped and logged
+(`cannot register shortcut` in `taskbar.*.log`).
+
 ### Detects sign-out and shutdown
 Nothing is restarted while the session ends, and components closing then are
 not counted as crashes.
@@ -83,8 +103,12 @@ not counted as crashes.
   Windows shows toasts itself where possible (unverified).
 - Slideshow and Windows Spotlight wallpapers are shown as the current image;
   explorer.rs does not advance the slideshow.
-- Explorer-only features (Win+X menu, Task View hosting, etc.) are not
-  provided unless other explorer.rs components implement them.
+- Explorer shortcuts not provided: the Win+X menu, Win+Tab (Task View),
+  Win+1..9 (taskbar apps), Win+T and Win+B (focus the taskbar or tray),
+  Win+M / Win+Shift+M, Win+Home and Win+, (peek at the desktop). Win+V,
+  Win+., Win+K, Win+P and Win+H belong to other Windows components and may
+  or may not work without Explorer (unverified). Win+L and Ctrl+Alt+Del are
+  handled by Windows itself.
 
 ## For the lead
 

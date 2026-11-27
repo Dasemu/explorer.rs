@@ -30,10 +30,12 @@ use explorer_core::calendar;
 use explorer_core::catalog::{Catalog, LaunchTarget};
 use explorer_core::clock::{self, DateTime};
 use explorer_core::config::{Alignment, AutoHide, Config, MonitorSelection};
+use explorer_core::display::{self, DisplayChange, MonitorKey};
 use explorer_core::i18n::Lang;
 use explorer_core::image::SharedImage;
 use explorer_core::ipc::{LauncherCommand, RunMode, TASKBAR_WINDOW_CLASS};
 use explorer_core::paths::AppPaths;
+use explorer_core::shell_keys::{self, ShellAction, ShellHotkey};
 use explorer_core::shellpath::{file_stem, looks_like_path, same_path, KnownFolders};
 use explorer_core::start::{Pins, DEFAULT_TASKBAR_PIN_IDS};
 use explorer_core::taskbar_groups::{
@@ -55,8 +57,8 @@ use explorer_win::windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPAR
 use explorer_win::windows::Win32::Graphics::Gdi::InvalidateRect;
 use explorer_win::windows::Win32::UI::WindowsAndMessaging::{
     DestroyWindow, KillTimer, PostMessageW, SetTimer, ShowWindowAsync, SW_MINIMIZE, SW_RESTORE,
-    WM_APP, WM_CLOSE, WM_DESTROY, WM_DISPLAYCHANGE, WM_POWERBROADCAST, WM_SETTINGCHANGE, WM_TIMER,
-    WS_EX_TOOLWINDOW, WS_POPUP,
+    WM_APP, WM_CLOSE, WM_DESTROY, WM_DISPLAYCHANGE, WM_HOTKEY, WM_POWERBROADCAST, WM_SETTINGCHANGE,
+    WM_TIMER, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use crate::bar::Bar;
@@ -744,6 +746,10 @@ pub fn run(args: Args) -> i32 {
             update_state_file: paths.update_state_file(),
             update_checking: false,
             update_shown: false,
+            bar_monitors: Vec::new(),
+            hotkeys: Vec::new(),
+            print_screen_wanted: None,
+            windows_build: explorer_win::registry::windows_build(),
         }),
     ) {
         Ok(h) => h,
@@ -794,6 +800,15 @@ struct Controller {
     /// The update reminder was shown by this taskbar (at most once per
     /// sign-in session; restarts are covered by the 3-day interval).
     update_shown: bool,
+    /// The monitors the current bars were built for.
+    bar_monitors: Vec<MonitorKey>,
+    /// Shell mode: Explorer's shortcuts we registered (hotkey ids).
+    hotkeys: Vec<i32>,
+    /// Shell mode: whether the lone Print Screen key should open the screen
+    /// clip overlay, as last evaluated (None: not yet).
+    print_screen_wanted: Option<bool>,
+    /// Windows' build number (for the Print Screen default).
+    windows_build: Option<u32>,
 }
 
 /// Ask the controller to close the update reminder (the reminder must not
@@ -925,6 +940,15 @@ impl Controller {
         }
     }
 
+    /// The monitors that get a bar.
+    fn bar_targets(&self) -> Vec<monitors::Monitor> {
+        let mut mons = monitors::all();
+        if self.shared.config.taskbar.monitors == MonitorSelection::Primary {
+            mons.retain(|m| m.primary);
+        }
+        mons
+    }
+
     fn rebuild_bars(&mut self) {
         flyout::close(&self.shared);
         let old: Vec<HWND> = self.shared.bars.borrow_mut().drain(..).collect();
@@ -933,10 +957,11 @@ impl Controller {
             // from inside the bar's own handler).
             let _ = unsafe { DestroyWindow(b) };
         }
-        let mut mons = monitors::all();
-        if self.shared.config.taskbar.monitors == MonitorSelection::Primary {
-            mons.retain(|m| m.primary);
-        }
+        // Full screen first: a bar created over a full-screen game must
+        // start below it (`Bar::create` reads this), not topmost.
+        self.check_fullscreen(true);
+        let mons = self.bar_targets();
+        self.bar_monitors = mons.iter().map(|m| m.key()).collect();
         for m in mons {
             tracing::info!(monitor = %m.describe(), "creating bar");
             match Bar::create(self.shared.clone(), m) {
@@ -944,8 +969,150 @@ impl Controller {
                 Err(e) => tracing::error!(error = %e, "cannot create bar window"),
             }
         }
-        // New bars start topmost: tell them about a full-screen app.
-        self.check_fullscreen(true);
+    }
+
+    /// Display settings changed (debounced). Rebuild the bars only when
+    /// the set of monitors changed; a new resolution, position or scale
+    /// (a game switching to exclusive full screen) only moves them.
+    fn on_display_change(&mut self) {
+        let mons = self.bar_targets();
+        for m in &mons {
+            tracing::info!(monitor = %m.describe(), "display changed");
+        }
+        let keys: Vec<MonitorKey> = mons.iter().map(|m| m.key()).collect();
+        let change = display::classify(&self.bar_monitors, &keys);
+        tracing::info!(?change, monitors = keys.len(), "display change");
+        match change {
+            DisplayChange::Rebuild => self.rebuild_bars(),
+            DisplayChange::Reposition => {
+                self.bar_monitors = keys;
+                // The bars learn about a full-screen window before they
+                // move (messages are handled in order).
+                self.check_fullscreen(true);
+                flyout::close(&self.shared);
+                self.post_bars(crate::bar::WM_APP_POSITION);
+            }
+            DisplayChange::Unchanged => {
+                self.check_fullscreen(true);
+                self.post_bars(crate::bar::WM_APP_CHECK_RESERVE);
+            }
+        }
+    }
+
+    /// Shell mode: provide the Explorer shortcuts that Windows leaves to
+    /// the shell (`explorer_core::shell_keys`).
+    fn register_shell_keys(&mut self, hwnd: HWND) {
+        if !shell_keys::wanted(self.shared.mode) {
+            return;
+        }
+        let mut failed = Vec::new();
+        for k in shell_keys::win_hotkeys() {
+            match explorer_win::keyboard::register_hotkey(hwnd, k) {
+                Ok(()) => self.hotkeys.push(k.id),
+                Err(e) => {
+                    tracing::warn!(key = k.name, error = %e, "cannot register shortcut (another program holds it?)");
+                    failed.push(k.name);
+                }
+            }
+        }
+        tracing::info!(
+            registered = self.hotkeys.len(),
+            ?failed,
+            "shell shortcuts registered"
+        );
+        self.update_print_screen(hwnd);
+    }
+
+    /// Follow Windows' "Use the Print screen key to open screen capture"
+    /// setting. When it is off the key is left to Windows (clipboard copy).
+    fn update_print_screen(&mut self, hwnd: HWND) {
+        if !shell_keys::wanted(self.shared.mode) {
+            return;
+        }
+        let flag = explorer_win::registry::read_dword(
+            explorer_win::registry::Root::CurrentUser,
+            r"Control Panel\Keyboard",
+            "PrintScreenKeyForSnippingEnabled",
+        );
+        let want = shell_keys::print_screen_opens_snipping(flag, self.windows_build);
+        if self.print_screen_wanted == Some(want) {
+            return;
+        }
+        self.print_screen_wanted = Some(want);
+        match shell_keys::print_screen_hotkey(want) {
+            Some(k) => match explorer_win::keyboard::register_hotkey(hwnd, &k) {
+                Ok(()) => {
+                    self.hotkeys.push(k.id);
+                    tracing::info!(?flag, "Print Screen opens the screen clip overlay");
+                }
+                Err(e) => tracing::warn!(error = %e, "cannot register the Print Screen key"),
+            },
+            None => {
+                if let Some(i) = self
+                    .hotkeys
+                    .iter()
+                    .position(|&id| id == shell_keys::PRINT_SCREEN_ID)
+                {
+                    explorer_win::keyboard::unregister_hotkey(hwnd, shell_keys::PRINT_SCREEN_ID);
+                    self.hotkeys.remove(i);
+                }
+                tracing::info!(?flag, build = ?self.windows_build, "Print Screen left to Windows");
+            }
+        }
+    }
+
+    fn on_shell_key(&mut self, k: ShellHotkey) {
+        tracing::info!(key = k.name, action = ?k.action, "shell shortcut");
+        match k.action {
+            ShellAction::ScreenClip => crate::workers::open_uri("ms-screenclip:"),
+            ShellAction::ScreenshotToFile => {
+                let lang = self.shared.lang;
+                let r = std::thread::Builder::new()
+                    .name("screenshot".into())
+                    .spawn(move || {
+                        let _com = ComApartment::mta();
+                        match explorer_win::screenshot::save_screen(lang) {
+                            Ok(p) => tracing::info!(path = %p.display(), "screenshot saved"),
+                            Err(e) => tracing::warn!(error = %e, "screenshot failed"),
+                        }
+                    });
+                if let Err(e) = r {
+                    tracing::error!(error = %e, "cannot spawn screenshot thread");
+                }
+            }
+            // As the Start menu's "File Explorer" button does: with our tray
+            // window present explorer.exe opens a window, it does not take
+            // over as the shell.
+            ShellAction::FileExplorer => crate::workers::open_uri("explorer.exe"),
+            ShellAction::Run => {
+                flyout::close(&self.shared);
+                // As for the Win key: let the Start menu take the focus.
+                explorer_win::keyboard::claim_foreground_rights();
+                explorer_win::ipc::send_launcher_command(LauncherCommand::Show);
+            }
+            ShellAction::Settings => crate::workers::open_uri("ms-settings:"),
+            ShellAction::ShowDesktop => self.shared.toggle_show_desktop(),
+            ShellAction::QuickSettings | ShellAction::Notifications => {
+                let which = if k.action == ShellAction::QuickSettings {
+                    crate::bar::FLYOUT_QUICK
+                } else {
+                    crate::bar::FLYOUT_CALENDAR
+                };
+                // The primary monitor's bar (bars are created primary
+                // first) has the system glyphs and the clock.
+                if let Some(&b) = self.shared.bars.borrow().first() {
+                    // SAFETY: posting to our own window.
+                    let _ = unsafe {
+                        PostMessageW(
+                            Some(b),
+                            crate::bar::WM_APP_OPEN_FLYOUT,
+                            WPARAM(which),
+                            LPARAM(0),
+                        )
+                    };
+                }
+            }
+        }
     }
 
     fn changed(&mut self) {
@@ -1172,8 +1339,10 @@ impl Handler for Controller {
                 explorer_win::win_taskbar::hide(f);
             }
             self.rebuild_bars();
-            if let Some(t) = self.shared.tray.borrow().as_ref() {
-                t.ensure_front();
+            if self.shared.fullscreen.borrow().is_empty() {
+                if let Some(t) = self.shared.tray.borrow().as_ref() {
+                    t.ensure_front();
+                }
             }
             return Some(LRESULT(0));
         }
@@ -1192,6 +1361,7 @@ impl Handler for Controller {
                     };
                 }
                 self.hooks = Some(ShellHooks::install(hwnd));
+                self.register_shell_keys(hwnd);
                 if self.shared.config.launcher.win_key_opens_launcher {
                     match WinKeyHook::install(hwnd, self.shared.mode == RunMode::Dev) {
                         Ok(k) => {
@@ -1299,6 +1469,7 @@ impl Handler for Controller {
                 }
                 self.check_auto_hide();
                 self.post_bars(crate::bar::WM_APP_CHECK_RESERVE);
+                self.update_print_screen(hwnd);
                 if self.shared.reload_appearance() {
                     tracing::info!("appearance changed");
                     self.shared.invalidate_bars();
@@ -1313,15 +1484,22 @@ impl Handler for Controller {
                         if self.shared.update_clock() {
                             self.shared.invalidate_bars();
                         }
+                        let fullscreen = !self.shared.fullscreen.borrow().is_empty();
                         let pruned = match self.shared.tray.borrow().as_ref() {
                             Some(t) => {
-                                t.ensure_front();
+                                // Not while a game is full screen: no
+                                // Z-order changes of ours then.
+                                if !fullscreen {
+                                    t.ensure_front();
+                                }
                                 self.ticks % 5 == 0 && t.prune()
                             }
                             None => false,
                         };
                         if self.ticks % 30 == 0 {
                             self.shared.tray_exe.borrow_mut().clear();
+                            // Settings may not broadcast a change for it.
+                            self.update_print_screen(hwnd);
                         }
                         if self.ticks % 2 == 0 {
                             if let Some(f) = &self.win_taskbar_state {
@@ -1360,7 +1538,7 @@ impl Handler for Controller {
                     TIMER_REBUILD => {
                         // SAFETY: our own timer.
                         let _ = unsafe { KillTimer(Some(hwnd), TIMER_REBUILD) };
-                        self.rebuild_bars();
+                        self.on_display_change();
                     }
                     TIMER_PEEK if !flyout::peek_tick(&self.shared) => {
                         // SAFETY: our own timer.
@@ -1380,7 +1558,16 @@ impl Handler for Controller {
             // Only the graceful shutdown message or the quit menu end the
             // taskbar; a WM_CLOSE from another program is ignored.
             WM_CLOSE => Some(LRESULT(0)),
+            WM_HOTKEY => {
+                if let Some(k) = shell_keys::by_id(wparam.0 as i32) {
+                    self.on_shell_key(k);
+                }
+                Some(LRESULT(0))
+            }
             WM_DESTROY => {
+                for id in self.hotkeys.drain(..) {
+                    explorer_win::keyboard::unregister_hotkey(hwnd, id);
+                }
                 self.winkey = None;
                 self.hooks = None;
                 window::quit_unexpected();

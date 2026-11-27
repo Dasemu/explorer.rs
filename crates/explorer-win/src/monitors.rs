@@ -75,6 +75,33 @@ pub fn query(hmon: HMONITOR) -> Option<Monitor> {
     })
 }
 
+/// The monitor `m` is now: by its handle, or, if Windows replaced the
+/// handle (display changes may), by its device name.
+pub fn refresh(m: &Monitor) -> Option<Monitor> {
+    query(m.handle)
+        .filter(|n| n.device == m.device)
+        .or_else(|| all().into_iter().find(|n| n.device == m.device))
+}
+
+impl Monitor {
+    /// The monitor as `explorer_core::display` compares it.
+    pub fn key(&self) -> explorer_core::display::MonitorKey {
+        let r = self.rect;
+        explorer_core::display::MonitorKey {
+            device: self.device.clone(),
+            handle: self.handle.0 as isize,
+            primary: self.primary,
+            rect: explorer_core::fullscreen::ScreenRect {
+                left: r.left,
+                top: r.top,
+                right: r.right,
+                bottom: r.bottom,
+            },
+            dpi: self.dpi,
+        }
+    }
+}
+
 /// All monitors, primary first.
 pub fn all() -> Vec<Monitor> {
     let mut out: Vec<Monitor> = Vec::new();
