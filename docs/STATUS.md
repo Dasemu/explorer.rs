@@ -92,7 +92,7 @@ linked per area.
 
 | Item |
 |---|
-| AppBar reservation per monitor; work area in shell mode (`SPI_SETWORKAREA`); Per-Monitor v2 DPI and mixed-DPI layout; `WM_DISPLAYCHANGE` rebuild |
+| AppBar reservation per monitor; work area in shell mode (`SPI_SETWORKAREA`); Per-Monitor v2 DPI and mixed-DPI layout; `WM_DISPLAYCHANGE`: rebuild on monitor set changes, move otherwise; work-area gap check; shell-mode Explorer shortcuts (screenshots, Win+E/R/I/D/A/N) |
 | Window list via shell hook + WinEvents; UWP ghost/cloak filtering; flashing; click activate/minimize; full-screen app handling |
 | Grouping by app (AUMID/exe), `taskbar.combine` |
 | Pins (shared file, seeding, mtime reload, launch, pin/unpin, drag reorder) |

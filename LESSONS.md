@@ -247,3 +247,29 @@ Non-obvious findings. Add an entry whenever something surprises you.
   Reserving once at start-up is not enough: check every few seconds that
   the work area still leaves the bar's space free, and reserve again (with
   a back-off, each attempt broadcasts to every window).
+- **A display change is not a new set of monitors.** A game going exclusive
+  full screen at another resolution fires WM_DISPLAYCHANGE. Recreating every
+  bar then put new topmost bars over the game, which dropped out of full
+  screen, which changed the resolution back: a loop (Rocket League on a
+  secondary monitor). Rebuild only when monitors come or go or the primary
+  changes (compare device names; HMONITOR handles may be replaced), else
+  move the existing bars; detect full screen before any bar moves or is
+  created; and set the Z order in the same SetWindowPos that shows the bar.
+  `HWND_NOTOPMOST` followed by "after the game" also flashed the bar over a
+  non-topmost game: one call with the game as insert-after does both.
+- **Explorer implements the screenshot keys.** Win+Shift+S, Print Screen
+  (when it opens Snipping Tool) and Win+Print Screen are Explorer's, not
+  Windows': in shell mode they did nothing. The taskbar registers them (and
+  Win+E/R/I/D/A/N) with RegisterHotKey in shell mode only. The plain Print
+  Screen copy to the clipboard is Windows' own, so that key is only taken
+  when the Snipping Tool setting is on. Low-level hooks see the keys before
+  hotkey processing, so the Win tap detector still sees a chord.
+- **Check the work area both ways.** The reservation check only noticed a
+  work area reaching under the bar. A gap (work area ending above the bar,
+  reported on secondary monitors with different resolutions) went unseen
+  and unlogged. Shell mode now corrects a gap too; alongside Explorer a gap
+  is only logged, since Explorer's AppBar manager owns the work area. Each
+  distinct placement is logged (`taskbar placed`: monitor, DPI of monitor
+  and window, thickness, bar, window rect, work area) so the cause can be
+  read from a user's log. Restoring the work area on exit uses the
+  monitor's current rectangle, not the one saved at reservation time.
