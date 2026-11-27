@@ -115,6 +115,22 @@ mod tests {
     }
 
     #[test]
+    fn shell_shortcuts_do_not_open_start() {
+        // Win+Shift+S.
+        let mut d = WinKeyDetector::new();
+        d.on_key(VK_LWIN, true, false);
+        d.on_key(0xA0, true, false); // left Shift
+        d.on_key(0x53, true, false); // S
+        d.on_key(0x53, false, false);
+        d.on_key(0xA0, false, false);
+        assert_eq!(d.on_key(VK_LWIN, false, false), KeyAction::Pass);
+        // Win+PrtScn: Print Screen may reach the hook as a key-up only.
+        d.on_key(VK_LWIN, true, false);
+        d.on_key(0x2C, false, false);
+        assert_eq!(d.on_key(VK_LWIN, false, false), KeyAction::Pass);
+    }
+
+    #[test]
     fn stray_keyup_ignored() {
         let mut d = WinKeyDetector::new();
         assert_eq!(d.on_key(VK_LWIN, false, false), KeyAction::Pass);

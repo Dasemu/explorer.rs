@@ -420,3 +420,38 @@ pub fn click_is_foreign(pt: POINT) -> bool {
         pid != GetCurrentProcessId()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Shell shortcuts (RegisterHotKey)
+// ---------------------------------------------------------------------------
+
+/// Register one of Explorer's shortcuts on `hwnd` (`WM_HOTKEY` with the
+/// shortcut's id). Fails when another program (or Explorer) holds it.
+///
+/// `RegisterHotKey` rather than the low-level hook: Windows then swallows
+/// the keys for us, so the foreground app does not also see them, and the
+/// Win key tap detector still sees the chord (low-level hooks run first)
+/// and does not open Start.
+pub fn register_hotkey(
+    hwnd: HWND,
+    key: &explorer_core::shell_keys::ShellHotkey,
+) -> windows::core::Result<()> {
+    use explorer_core::shell_keys::MOD_NOREPEAT;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, HOT_KEY_MODIFIERS};
+    // SAFETY: plain call on our own window.
+    unsafe {
+        RegisterHotKey(
+            Some(hwnd),
+            key.id,
+            HOT_KEY_MODIFIERS(key.modifiers | MOD_NOREPEAT),
+            key.vk,
+        )
+    }
+}
+
+/// Undo [`register_hotkey`].
+pub fn unregister_hotkey(hwnd: HWND, id: i32) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey;
+    // SAFETY: plain call on our own window.
+    let _ = unsafe { UnregisterHotKey(Some(hwnd), id) };
+}

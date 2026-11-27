@@ -15,6 +15,9 @@
 use explorer_core::config::Edge;
 use explorer_core::ipc::RunMode;
 use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromRect, MONITORINFO, MONITOR_DEFAULTTONULL,
+};
 use windows::Win32::UI::Shell::{
     SHAppBarMessage, ABE_BOTTOM, ABE_TOP, ABM_ACTIVATE, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE,
     ABM_SETPOS, ABM_WINDOWPOSCHANGED, APPBARDATA,
@@ -179,7 +182,13 @@ impl AppBar {
             self.registered = false;
         }
         if let Some(m) = self.work_area_monitor.take() {
-            set_work_area(&m);
+            // Give the monitor its whole area back. Its rectangle may have
+            // changed since we reserved (new resolution or layout): use the
+            // monitor's current one, never the stale copy, which could
+            // now lie on another monitor.
+            if let Some(now) = current_monitor_rect(&m) {
+                set_work_area(&now);
+            }
         }
     }
 }
@@ -187,6 +196,24 @@ impl AppBar {
 impl Drop for AppBar {
     fn drop(&mut self) {
         self.remove();
+    }
+}
+
+/// Current rectangle of the monitor that holds most of `r`, if any.
+fn current_monitor_rect(r: &RECT) -> Option<RECT> {
+    // SAFETY: plain queries with valid pointers.
+    unsafe {
+        let mon = MonitorFromRect(r, MONITOR_DEFAULTTONULL);
+        if mon.is_invalid() {
+            return None;
+        }
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        GetMonitorInfoW(mon, &mut info)
+            .as_bool()
+            .then_some(info.rcMonitor)
     }
 }
 

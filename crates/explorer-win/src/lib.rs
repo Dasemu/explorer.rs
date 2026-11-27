@@ -47,6 +47,8 @@ pub mod registry;
 #[cfg(windows)]
 pub mod sched;
 #[cfg(windows)]
+pub mod screenshot;
+#[cfg(windows)]
 pub mod secdir;
 #[cfg(windows)]
 pub mod security;

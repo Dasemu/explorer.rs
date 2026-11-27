@@ -11,6 +11,7 @@ use explorer_core::anim::{self, Fades, Tween};
 use explorer_core::autohide::{self, Linger, Reasons};
 use explorer_core::config::{Combine, Edge};
 use explorer_core::flyout_layout::step_level;
+use explorer_core::fullscreen::{bar_z, BarZ};
 use explorer_core::i18n::{tr, trf};
 use explorer_core::ipc::{LauncherCommand, RunMode, LAUNCHER_WINDOW_CLASS, TASKBAR_WINDOW_CLASS};
 use explorer_core::layout::Rect;
@@ -38,13 +39,13 @@ use explorer_win::windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use explorer_win::windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, FindWindowW, GetClientRect, GetCursorPos,
-    GetWindowRect, IsWindowVisible, KillTimer, PostMessageW, SetTimer, SetWindowPos,
-    HWND_NOTOPMOST, HWND_TOPMOST, MA_NOACTIVATE, MF_GRAYED, MF_SEPARATOR, MF_STRING,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, TPM_NONOTIFY,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_CREATE,
-    WM_DESTROY, WM_DPICHANGED, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP,
-    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE,
-    WM_TIMER, WM_WINDOWPOSCHANGED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    GetWindowRect, IsWindowVisible, KillTimer, PostMessageW, SetTimer, SetWindowPos, HWND_BOTTOM,
+    HWND_TOPMOST, MA_NOACTIVATE, MF_GRAYED, MF_SEPARATOR, MF_STRING, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DPICHANGED,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_TIMER, WM_WINDOWPOSCHANGED,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::app::Shared;
@@ -52,7 +53,8 @@ use crate::flyout::{self, Anchor, Opener, Request};
 use crate::workers::SysCmd;
 
 const WM_APP_APPBAR: u32 = WM_APP + 2;
-const WM_APP_POSITION: u32 = WM_APP + 3;
+/// Re-place the bar (also posted by the controller after a display change).
+pub(crate) const WM_APP_POSITION: u32 = WM_APP + 3;
 /// Posted by the controller when the foreground window changes in dev
 /// mode: put the bar back on top of explorer's own taskbar, which Windows
 /// raises when its Search, Start or Task view opens.
@@ -68,6 +70,11 @@ pub(crate) const WM_APP_REVEAL: u32 = WM_APP + 43;
 /// Posted by the controller every few seconds and on setting changes:
 /// check that the work area still leaves the bar's space free.
 pub(crate) const WM_APP_CHECK_RESERVE: u32 = WM_APP + 44;
+/// Posted by the controller for Win+A (wParam [`FLYOUT_QUICK`]) and Win+N
+/// ([`FLYOUT_CALENDAR`]) in shell mode: open that flyout from this bar.
+pub(crate) const WM_APP_OPEN_FLYOUT: u32 = WM_APP + 45;
+pub(crate) const FLYOUT_QUICK: usize = 0;
+pub(crate) const FLYOUT_CALENDAR: usize = 1;
 
 /// WinUser.h value; not exported by the `windows` crate module we use.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -208,6 +215,11 @@ pub(crate) struct Bar {
     /// Consecutive checks that found the reservation lost (back-off).
     reserve_lost: u32,
     reserve_checks: u32,
+    /// Last placement logged (monitor, bar, work area), so that each
+    /// distinct placement is logged once at info.
+    placement_logged: String,
+    /// A gap left by Explorer's AppBar manager (dev mode) was logged.
+    gap_logged: bool,
 }
 
 /// Key under which a hit's hover highlight animates.
@@ -261,27 +273,37 @@ impl Bar {
         self.abn_fullscreen || self.fullscreen_window.is_some()
     }
 
-    /// Topmost normally; with a full-screen app in front on this monitor,
-    /// right below it (not just non-topmost: the bar would still cover the
-    /// game until the game was activated again).
-    fn apply_z_order(&self, hwnd: HWND) {
-        let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
-        // SAFETY: z-order changes on our own window; `w` may have vanished
-        // (the call then fails harmlessly).
-        unsafe {
-            match self.fullscreen_window {
-                Some(w) => {
-                    let _ = SetWindowPos(hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, flags);
-                    let _ = SetWindowPos(hwnd, Some(w), 0, 0, 0, 0, flags);
-                }
-                None if self.abn_fullscreen => {
-                    let _ = SetWindowPos(hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, flags);
-                }
-                None => {
-                    let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
-                }
-            }
+    /// Where to insert the bar in the Z order: topmost normally; with a
+    /// full-screen app in front on this monitor, right below it (not just
+    /// non-topmost: the bar would still cover the game until the game was
+    /// activated again).
+    fn z_insert_after(&self) -> HWND {
+        match bar_z(
+            self.fullscreen_window.map(|w| w.0 as u64),
+            self.abn_fullscreen,
+        ) {
+            BarZ::Topmost => HWND_TOPMOST,
+            BarZ::Below(w) => HWND(w as *mut core::ffi::c_void),
+            BarZ::Bottom => HWND_BOTTOM,
         }
+    }
+
+    fn apply_z_order(&self, hwnd: HWND) {
+        // One call: going through HWND_NOTOPMOST first would put the bar
+        // above the game for a moment (`explorer_core::fullscreen::BarZ`).
+        // SAFETY: z-order change on our own window; the full-screen window
+        // may have vanished (the call then fails harmlessly).
+        let _ = unsafe {
+            SetWindowPos(
+                hwnd,
+                Some(self.z_insert_after()),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+        };
     }
 
     // -- auto-hide ----------------------------------------------------------
@@ -506,23 +528,45 @@ impl Bar {
         self.position(hwnd);
     }
 
-    /// Re-reserve the bar's space if the work area lost it. After a few
-    /// attempts that did not stick, only try every ~30 s: each attempt
-    /// broadcasts a setting change to every window.
+    /// Re-reserve the bar's space if the work area lost it, or (shell
+    /// mode) left a gap above it. After a few attempts that did not stick,
+    /// only try every ~30 s: each attempt broadcasts a setting change to
+    /// every window.
     fn check_reservation(&mut self, hwnd: HWND) {
         if self.auto_hide {
             self.reserve_lost = 0;
             return;
         }
+        // Never while a full-screen app is in front: re-reserving
+        // broadcasts WM_SETTINGCHANGE to the game too, and a game that
+        // switched the resolution may have made Windows reset the work
+        // area. Checked again once it is gone.
+        if self.in_fullscreen() {
+            return;
+        }
         self.reserve_checks = self.reserve_checks.wrapping_add(1);
-        let Some(m) = monitors::query(self.monitor.handle) else {
+        let Some(m) = monitors::refresh(&self.monitor) else {
             return;
         };
         let r = self.base_rect;
         let bottom = self.shared.config.taskbar.position == Edge::Bottom;
-        if !autohide::reservation_lost(m.work.top, m.work.bottom, r.top, r.bottom, bottom) {
+        let check = autohide::check_reservation(m.work.top, m.work.bottom, r.top, r.bottom, bottom);
+        let owns_work_area = self.shared.mode == RunMode::Shell;
+        if !autohide::should_reserve_again(check, owns_work_area) {
             if self.reserve_lost > 0 {
                 tracing::info!(monitor = %m.describe(), "taskbar space reserved again");
+            }
+            if let (autohide::Reservation::Gap { px }, false) = (check, self.gap_logged) {
+                // Alongside Explorer: its AppBar manager decides; say so
+                // once, it explains a gap a user may report.
+                tracing::info!(
+                    monitor = %m.describe(),
+                    px,
+                    work = ?(m.work.top, m.work.bottom),
+                    bar = ?(r.top, r.bottom),
+                    "the work area leaves a gap above the taskbar (Explorer's AppBar manager holds more room)"
+                );
+                self.gap_logged = true;
             }
             self.reserve_lost = 0;
             return;
@@ -536,12 +580,14 @@ impl Bar {
         match autohide::loss_severity(self.reserve_lost) {
             Some(autohide::LossSeverity::Expected) => tracing::info!(
                 monitor = %m.describe(),
+                ?check,
                 work = ?(m.work.top, m.work.bottom),
                 bar = ?(r.top, r.bottom),
-                "the work area no longer leaves room for the taskbar; reserving it again"
+                "the work area does not match the taskbar; reserving it again"
             ),
             Some(autohide::LossSeverity::Persistent) => tracing::warn!(
                 monitor = %m.describe(),
+                ?check,
                 work = ?(m.work.top, m.work.bottom),
                 bar = ?(r.top, r.bottom),
                 "reserving the taskbar's space again did not stick; retrying"
@@ -561,12 +607,26 @@ impl Bar {
             shared.config.taskbar.position,
             thickness(&shared, m.dpi),
         );
+        // A bar created while a full-screen app is in front on its monitor
+        // (the controller detects it before creating bars) starts below it,
+        // never topmost over it.
+        let fullscreen_window = shared
+            .fullscreen
+            .borrow()
+            .iter()
+            .find(|(mon, _)| *mon == m.handle.0 as isize)
+            .map(|(_, w)| HWND(*w as *mut core::ffi::c_void));
+        let ex_style = if fullscreen_window.is_some() {
+            WS_EX_TOOLWINDOW
+        } else {
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST
+        };
         window::create(
             CreateParams {
                 class: TASKBAR_WINDOW_CLASS,
                 title: "explorer.rs taskbar",
                 style: WS_POPUP,
-                ex_style: WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+                ex_style,
                 rect,
                 parent: None,
             },
@@ -585,7 +645,7 @@ impl Bar {
                 hover_fx: Fades::default(),
                 anim_timer: false,
                 abn_fullscreen: false,
-                fullscreen_window: None,
+                fullscreen_window,
                 auto_hide: false,
                 hidden: 0.0,
                 slide: None,
@@ -593,6 +653,8 @@ impl Bar {
                 base_rect: rect,
                 reserve_lost: 0,
                 reserve_checks: 0,
+                placement_logged: String::new(),
+                gap_logged: false,
             }),
         )
     }
@@ -681,8 +743,9 @@ impl Bar {
     }
 
     fn position(&mut self, hwnd: HWND) {
-        // Refresh monitor info: DPI or work area may have changed.
-        if let Some(m) = monitors::query(self.monitor.handle) {
+        // Refresh monitor info: resolution, DPI or work area may have
+        // changed, and Windows may have replaced the monitor's handle.
+        if let Some(m) = monitors::refresh(&self.monitor) {
             self.monitor = m;
         }
         let thickness = thickness(&self.shared, self.monitor.dpi);
@@ -694,11 +757,15 @@ impl Bar {
         };
         self.base_rect = rect;
         let rect = self.slid_rect();
+        // The Z order goes in the same call: a separate "topmost, then
+        // below the game" flashed the bar over an exclusive full-screen
+        // game after its resolution change, which knocked it out of full
+        // screen (and changed the resolution again, in a loop).
         // SAFETY: positioning our own window.
         let _ = unsafe {
             SetWindowPos(
                 hwnd,
-                Some(HWND_TOPMOST),
+                Some(self.z_insert_after()),
                 rect.left,
                 rect.top,
                 rect.right - rect.left,
@@ -707,14 +774,53 @@ impl Bar {
             )
         };
         self.apply_region(hwnd);
-        // A full-screen game that changed the resolution is still in front.
-        if self.in_fullscreen() {
-            self.apply_z_order(hwnd);
-        }
+        self.log_placement(hwnd, thickness);
         if let Some(s) = self.surface.as_mut() {
             s.resize();
         }
         invalidate(hwnd);
+    }
+
+    /// Log, once per distinct placement, everything needed to explain a
+    /// gap or an overlap between the bar and maximized windows: the
+    /// monitor, the DPI of the monitor and of the window, the bar, the
+    /// thickness reserved, the window's real rectangle and the resulting
+    /// work area.
+    fn log_placement(&mut self, hwnd: HWND, thickness: i32) {
+        let mut win = RECT::default();
+        // SAFETY: valid out-pointer.
+        let _ = unsafe { GetWindowRect(hwnd, &mut win) };
+        let work = monitors::refresh(&self.monitor).map(|m| m.work);
+        let r = self.base_rect;
+        let check = work.map(|w| {
+            autohide::check_reservation(
+                w.top,
+                w.bottom,
+                r.top,
+                r.bottom,
+                self.shared.config.taskbar.position == Edge::Bottom,
+            )
+        });
+        let m = &self.monitor;
+        let rc = |r: RECT| format!("({},{})-({},{})", r.left, r.top, r.right, r.bottom);
+        let text = format!(
+            "device={} monitor={} monitor_dpi={} window_dpi={} thickness={} bar={} window={} work={} check={:?} mode={} auto_hide={}",
+            m.device,
+            rc(m.rect),
+            m.dpi,
+            explorer_win::dpi::window_dpi(hwnd),
+            thickness,
+            rc(r),
+            rc(win),
+            work.map(rc).unwrap_or_else(|| "?".into()),
+            check,
+            self.shared.mode.as_str(),
+            self.auto_hide,
+        );
+        if text != self.placement_logged {
+            tracing::info!(placement = %text, "taskbar placed");
+            self.placement_logged = text;
+        }
     }
 
     fn paint(&mut self, hwnd: HWND) {
@@ -1626,6 +1732,11 @@ impl Handler for Bar {
                 Some(LRESULT(0))
             }
             WM_APP_FULLSCREEN => {
+                // Full-screen windows are keyed by the monitor's current
+                // handle, which a display change may have replaced.
+                if let Some(m) = monitors::refresh(&self.monitor) {
+                    self.monitor.handle = m.handle;
+                }
                 let mon = self.monitor.handle.0 as isize;
                 self.fullscreen_window = self
                     .shared
@@ -1662,6 +1773,26 @@ impl Handler for Bar {
                 self.check_reservation(hwnd);
                 Some(LRESULT(0))
             }
+            WM_APP_OPEN_FLYOUT => {
+                if self.auto_hide {
+                    // The flyout anchors to the bar: bring it up first (an
+                    // open flyout then keeps it up).
+                    self.slide = None;
+                    self.finish_slide(hwnd, 0.0);
+                    // SAFETY: our own timer.
+                    unsafe { SetTimer(Some(hwnd), TIMER_AUTOHIDE, AUTOHIDE_POLL_MS, None) };
+                }
+                match wparam.0 {
+                    FLYOUT_QUICK => {
+                        self.toggle(hwnd, Hit::System(0), Opener::System, Request::Quick)
+                    }
+                    FLYOUT_CALENDAR => {
+                        self.toggle(hwnd, Hit::Clock, Opener::Clock, Request::Calendar)
+                    }
+                    _ => {}
+                }
+                Some(LRESULT(0))
+            }
             WM_TIMER if wparam.0 == TIMER_AUTOHIDE => {
                 self.autohide_tick(hwnd);
                 Some(LRESULT(0))
@@ -1671,19 +1802,9 @@ impl Handler for Bar {
                 Some(LRESULT(0))
             }
             WM_APP_RAISE => {
+                // Never above a full-screen app.
                 if !self.in_fullscreen() {
-                    // SAFETY: z-order change on our own window.
-                    let _ = unsafe {
-                        SetWindowPos(
-                            hwnd,
-                            Some(HWND_TOPMOST),
-                            0,
-                            0,
-                            0,
-                            0,
-                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                        )
-                    };
+                    self.apply_z_order(hwnd);
                 }
                 Some(LRESULT(0))
             }
@@ -1705,6 +1826,18 @@ impl Handler for Bar {
                 Some(LRESULT(0))
             }
             WM_DPICHANGED => {
+                // We place the bar from the monitor's own rectangle and DPI
+                // (`position`), not from the suggested rectangle; log both,
+                // a mismatch would explain a gap on a mixed-DPI setup.
+                // SAFETY: for WM_DPICHANGED, lParam points to a RECT.
+                let suggested = unsafe { *(lparam.0 as *const RECT) };
+                tracing::info!(
+                    device = %self.monitor.device,
+                    dpi = wparam.0 & 0xffff,
+                    monitor_dpi = self.monitor.dpi,
+                    suggested = ?(suggested.left, suggested.top, suggested.right, suggested.bottom),
+                    "taskbar DPI changed"
+                );
                 flyout::close(&self.shared);
                 self.position(hwnd);
                 Some(LRESULT(0))

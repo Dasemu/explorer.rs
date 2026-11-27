@@ -106,9 +106,43 @@ pub fn fullscreen_per_monitor(
     out
 }
 
+/// Where a taskbar goes in the Z order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BarZ {
+    /// Always on top (no full-screen app on its monitor).
+    Topmost,
+    /// Right below this full-screen window. One `SetWindowPos` with the
+    /// window as "insert after" also drops the topmost flag when the window
+    /// is not topmost itself; going through `HWND_NOTOPMOST` first would
+    /// put the bar above the game for a moment (enough to knock an
+    /// exclusive full-screen game back to the desktop).
+    Below(u64),
+    /// Full screen reported by Explorer (`ABN_FULLSCREENAPP`) without a
+    /// window we know of: the bottom of the Z order, which never covers it.
+    Bottom,
+}
+
+/// The Z order for a bar, given the full-screen window detected on its
+/// monitor and Explorer's `ABN_FULLSCREENAPP` state (dev mode).
+pub fn bar_z(fullscreen_window: Option<u64>, abn_fullscreen: bool) -> BarZ {
+    match fullscreen_window {
+        Some(w) => BarZ::Below(w),
+        None if abn_fullscreen => BarZ::Bottom,
+        None => BarZ::Topmost,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bars_never_go_above_a_full_screen_window() {
+        assert_eq!(bar_z(None, false), BarZ::Topmost);
+        assert_eq!(bar_z(Some(7), false), BarZ::Below(7));
+        assert_eq!(bar_z(Some(7), true), BarZ::Below(7));
+        assert_eq!(bar_z(None, true), BarZ::Bottom);
+    }
 
     fn r(left: i32, top: i32, right: i32, bottom: i32) -> ScreenRect {
         ScreenRect {
