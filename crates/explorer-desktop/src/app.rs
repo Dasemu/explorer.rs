@@ -33,12 +33,14 @@ use explorer_win::windows::Win32::Graphics::Gdi::{
 };
 use explorer_win::windows::Win32::UI::Shell::ShellExecuteW;
 use explorer_win::windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, SetWindowPos, ShowWindow, HWND_BOTTOM,
-    MA_NOACTIVATE, MF_SEPARATOR, MF_STRING, SPI_SETDESKWALLPAPER, SWP_NOACTIVATE, SWP_NOZORDER,
-    SW_SHOWNOACTIVATE, SW_SHOWNORMAL, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOWPOS, WM_CLOSE,
-    WM_CONTEXTMENU, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND,
-    WM_MOUSEACTIVATE, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_WINDOWPOSCHANGING,
-    WS_CLIPCHILDREN, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, DestroyWindow, GetCursorPos, GetWindow, IsWindow,
+    IsWindowVisible, PostMessageW, SetWindowPos, ShowWindow, GW_CHILD, GW_HWNDNEXT, HWND_BOTTOM,
+    MA_NOACTIVATE, MF_SEPARATOR, MF_STRING, SPI_SETDESKWALLPAPER, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, WINDOWPOS, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_CREATE,
+    WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_MOUSEACTIVATE, WM_PAINT,
+    WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_WINDOWPOSCHANGING, WS_CHILD, WS_CLIPCHILDREN,
+    WS_CLIPSIBLINGS, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use crate::Args;
@@ -65,48 +67,86 @@ fn color(c: u32) -> D2D1_COLOR_F {
     }
 }
 
-struct Desktop {
+/// Draw the wallpaper into `hwnd` through `surface`.
+fn paint_surface(
+    surface: &mut Surface,
     hwnd: HWND,
-    lang: Lang,
-    factory: ID2D1Factory,
-    target: Option<(ID2D1HwndRenderTarget, ID2D1SolidColorBrush)>,
-    bitmap: Option<ID2D1Bitmap>,
-    settings: Settings,
-    image: Option<Decoded>,
-    /// Virtual screen in screen coordinates.
+    factory: &ID2D1Factory,
     screen: RECT,
-    /// Monitor rects relative to the window origin.
-    monitors: Vec<Rect>,
+    settings: &Settings,
+    image: Option<&Decoded>,
+    monitors: &[Rect],
+) {
+    let Some((rt, brush)) = surface.ensure_target(factory, hwnd, screen) else {
+        return;
+    };
+    let bmp = surface.ensure_bitmap(&rt, image);
+    let size = image.map(|i| (i.width, i.height));
+    let vs = virtual_screen(monitors);
+    // SAFETY: BeginDraw/EndDraw pairing on a live target.
+    let result = unsafe {
+        rt.BeginDraw();
+        rt.Clear(Some(&color(settings.background)));
+        if let (Some(bmp), Some((w, h))) = (&bmp, size) {
+            for m in monitors {
+                match place(settings.style, w, h, *m, vs) {
+                    Placement::Draw { src, dst } => rt.DrawBitmap(
+                        bmp,
+                        Some(&d2r(dst)),
+                        1.0,
+                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                        Some(&d2r(src)),
+                    ),
+                    Placement::Tile => {
+                        let props = D2D1_BITMAP_BRUSH_PROPERTIES {
+                            extendModeX: D2D1_EXTEND_MODE_WRAP,
+                            extendModeY: D2D1_EXTEND_MODE_WRAP,
+                            interpolationMode: D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                        };
+                        if let Ok(tb) = rt.CreateBitmapBrush(bmp, Some(&props), None) {
+                            // Translation matrix (Matrix3x2 layout).
+                            let m3: [f32; 6] = [1.0, 0.0, 0.0, 1.0, m.x, m.y];
+                            tb.SetTransform(m3.as_ptr().cast());
+                            rt.FillRectangle(&d2r(*m), &tb);
+                        }
+                    }
+                    Placement::None => {}
+                }
+            }
+        }
+        let _ = &brush;
+        rt.EndDraw(None, None)
+    };
+    if let Err(e) = result {
+        tracing::debug!(error = %e, "EndDraw failed; recreating render target");
+        surface.drop_target();
+    }
 }
 
-impl Desktop {
-    fn refresh_geometry(&mut self) {
-        self.screen = explorer_win::desktop::virtual_screen();
-        let (ox, oy) = (self.screen.left as f32, self.screen.top as f32);
-        self.monitors = explorer_win::monitors::all()
-            .iter()
-            .map(|m| {
-                Rect::new(
-                    m.rect.left as f32 - ox,
-                    m.rect.top as f32 - oy,
-                    (m.rect.right - m.rect.left) as f32,
-                    (m.rect.bottom - m.rect.top) as f32,
-                )
-            })
-            .collect();
-        let r = self.screen;
-        // SAFETY: our own window.
-        let _ = unsafe {
-            SetWindowPos(
-                self.hwnd,
-                Some(HWND_BOTTOM),
-                r.left,
-                r.top,
-                r.right - r.left,
-                r.bottom - r.top,
-                SWP_NOACTIVATE,
-            )
-        };
+/// Undocumented message wallpaper apps (Wallpaper Engine, Lively, …) send
+/// to "Progman" so Explorer splits the desktop into `WorkerW` windows; they
+/// then parent their own window to the one behind the icons.
+const WM_SPAWN_WORKERW: u32 = 0x052C;
+/// Posted by the wallpaper `WorkerW` when it needs painting.
+const WM_APP_PAINT_WORKER: u32 = WM_APP + 1;
+/// Posted by the wallpaper `WorkerW` after it moved to the bottom, so the
+/// desktop goes back under it.
+const WM_APP_REBOTTOM: u32 = WM_APP + 2;
+
+/// A window the wallpaper is drawn into, with its own Direct2D target.
+#[derive(Default)]
+struct Surface {
+    target: Option<(ID2D1HwndRenderTarget, ID2D1SolidColorBrush)>,
+    bitmap: Option<ID2D1Bitmap>,
+}
+
+impl Surface {
+    fn drop_target(&mut self) {
+        self.target = None;
+        self.bitmap = None;
+    }
+
+    fn resize(&mut self, r: RECT) {
         if let Some((rt, _)) = &self.target {
             let size = D2D_SIZE_U {
                 width: (r.right - r.left).max(1) as u32,
@@ -119,14 +159,13 @@ impl Desktop {
         }
     }
 
-    fn drop_target(&mut self) {
-        self.target = None;
-        self.bitmap = None;
-    }
-
-    fn ensure_target(&mut self) -> Option<(ID2D1HwndRenderTarget, ID2D1SolidColorBrush)> {
+    fn ensure_target(
+        &mut self,
+        factory: &ID2D1Factory,
+        hwnd: HWND,
+        r: RECT,
+    ) -> Option<(ID2D1HwndRenderTarget, ID2D1SolidColorBrush)> {
         if self.target.is_none() {
-            let r = self.screen;
             let props = D2D1_RENDER_TARGET_PROPERTIES {
                 r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
                 pixelFormat: D2D1_PIXEL_FORMAT {
@@ -138,7 +177,7 @@ impl Desktop {
                 ..Default::default()
             };
             let hprops = D2D1_HWND_RENDER_TARGET_PROPERTIES {
-                hwnd: self.hwnd,
+                hwnd,
                 pixelSize: D2D_SIZE_U {
                     width: (r.right - r.left).max(1) as u32,
                     height: (r.bottom - r.top).max(1) as u32,
@@ -147,7 +186,7 @@ impl Desktop {
             };
             // SAFETY: valid property structs.
             let created = unsafe {
-                self.factory
+                factory
                     .CreateHwndRenderTarget(&props, &hprops)
                     .and_then(|rt| {
                         let b = rt.CreateSolidColorBrush(&color(0), None)?;
@@ -166,46 +205,13 @@ impl Desktop {
         self.target.clone()
     }
 
-    /// Re-read the settings; decode the image again if needed.
-    fn reload(&mut self, force_decode: bool) {
-        let new = wallpaper::settings();
-        let decode = force_decode
-            || self.image.is_none()
-            || new.path != self.settings.path
-            || new.style != self.settings.style;
-        self.settings = new;
-        if decode {
-            self.decode();
-        }
-    }
-
-    fn decode(&mut self) {
-        self.image = None;
-        self.bitmap = None;
-        let Some(path) = self.settings.path.clone() else {
-            tracing::info!("no wallpaper image; solid colour");
-            return;
-        };
-        let max_side = self
-            .ensure_target()
-            // SAFETY: plain query on a live target.
-            .map(|(rt, _)| unsafe { rt.GetMaximumBitmapSize() })
-            .unwrap_or(8192)
-            .max(1024);
-        let style = self.settings.style;
-        let monitors = self.monitors.clone();
-        match wallpaper::decode(&path, |w, h| decode_size(style, w, h, &monitors, max_side)) {
-            Ok(img) => {
-                tracing::info!(path = %path.display(), w = img.width, h = img.height, ?style, "wallpaper decoded");
-                self.image = Some(img);
-            }
-            Err(e) => tracing::warn!(path = %path.display(), error = %e, "cannot decode wallpaper"),
-        }
-    }
-
-    fn ensure_bitmap(&mut self, rt: &ID2D1HwndRenderTarget) -> Option<ID2D1Bitmap> {
+    fn ensure_bitmap(
+        &mut self,
+        rt: &ID2D1HwndRenderTarget,
+        image: Option<&Decoded>,
+    ) -> Option<ID2D1Bitmap> {
         if self.bitmap.is_none() {
-            let img = self.image.as_ref()?;
+            let img = image?;
             let props = D2D1_BITMAP_PROPERTIES {
                 pixelFormat: D2D1_PIXEL_FORMAT {
                     format: DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -236,52 +242,330 @@ impl Desktop {
         }
         self.bitmap.clone()
     }
+}
 
-    fn paint(&mut self) {
-        let Some((rt, brush)) = self.ensure_target() else {
-            return;
-        };
-        let bmp = self.ensure_bitmap(&rt);
-        let size = self.image.as_ref().map(|i| (i.width, i.height));
-        let vs = virtual_screen(&self.monitors);
-        // SAFETY: BeginDraw/EndDraw pairing on a live target.
-        let result = unsafe {
-            rt.BeginDraw();
-            rt.Clear(Some(&color(self.settings.background)));
-            if let (Some(bmp), Some((w, h))) = (&bmp, size) {
-                for m in &self.monitors {
-                    match place(self.settings.style, w, h, *m, vs) {
-                        Placement::Draw { src, dst } => rt.DrawBitmap(
-                            bmp,
-                            Some(&d2r(dst)),
-                            1.0,
-                            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-                            Some(&d2r(src)),
-                        ),
-                        Placement::Tile => {
-                            let props = D2D1_BITMAP_BRUSH_PROPERTIES {
-                                extendModeX: D2D1_EXTEND_MODE_WRAP,
-                                extendModeY: D2D1_EXTEND_MODE_WRAP,
-                                interpolationMode: D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-                            };
-                            if let Ok(tb) = rt.CreateBitmapBrush(bmp, Some(&props), None) {
-                                // Translation matrix (Matrix3x2 layout).
-                                let m3: [f32; 6] = [1.0, 0.0, 0.0, 1.0, m.x, m.y];
-                                tb.SetTransform(m3.as_ptr().cast());
-                                rt.FillRectangle(&d2r(*m), &tb);
-                            }
-                        }
-                        Placement::None => {}
+/// The `WorkerW` windows wallpaper apps look for after `WM_SPAWN_WORKERW`,
+/// laid out like Explorer does: a window holding `SHELLDLL_DefView`, and
+/// right below it in the z-order a full-screen `WorkerW` that the app
+/// parents its window to. Both sit above our "Progman".
+struct Workers {
+    /// Hidden, empty window holding the `SHELLDLL_DefView` child (we have
+    /// no desktop icons; it only marks the spot for the apps' lookup).
+    icons: HWND,
+    /// Full-screen window that hosts the app's wallpaper window.
+    wallpaper: HWND,
+    surface: Surface,
+}
+
+impl Workers {
+    fn alive(&self) -> bool {
+        // SAFETY: plain queries.
+        unsafe { IsWindow(Some(self.icons)).as_bool() && IsWindow(Some(self.wallpaper)).as_bool() }
+    }
+}
+
+/// Handler for the helper windows that only need to exist.
+struct Inert;
+
+impl Handler for Inert {
+    fn handle(&mut self, _: HWND, msg: u32, _: WPARAM, _: LPARAM) -> Option<LRESULT> {
+        match msg {
+            WM_MOUSEACTIVATE => Some(LRESULT(MA_NOACTIVATE as isize)),
+            WM_CLOSE => Some(LRESULT(0)),
+            _ => None,
+        }
+    }
+}
+
+/// Handler for the wallpaper `WorkerW`: painting is done by the desktop.
+struct WallpaperWorker {
+    desktop: HWND,
+}
+
+impl Handler for WallpaperWorker {
+    fn handle(&mut self, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
+        match msg {
+            WM_ERASEBKGND => Some(LRESULT(1)),
+            WM_PAINT => {
+                let mut ps = PAINTSTRUCT::default();
+                // SAFETY: BeginPaint/EndPaint pairing.
+                unsafe {
+                    BeginPaint(hwnd, &mut ps);
+                    let _ = EndPaint(hwnd, &ps);
+                    // Posted, not sent: the desktop may be busy creating us.
+                    let _ = PostMessageW(
+                        Some(self.desktop),
+                        WM_APP_PAINT_WORKER,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
+                }
+                Some(LRESULT(0))
+            }
+            WM_MOUSEACTIVATE => Some(LRESULT(MA_NOACTIVATE as isize)),
+            WM_WINDOWPOSCHANGING => {
+                // Stay just above the desktop: go to the bottom, then the
+                // desktop goes back under us.
+                // SAFETY: lParam points to a WINDOWPOS for this message.
+                if let Some(wp) = unsafe { (lparam.0 as *mut WINDOWPOS).as_mut() } {
+                    if (wp.flags & SWP_NOZORDER).0 == 0 && wp.hwndInsertAfter != HWND_BOTTOM {
+                        wp.hwndInsertAfter = HWND_BOTTOM;
+                        // SAFETY: posting to our own desktop window.
+                        let _ = unsafe {
+                            PostMessageW(Some(self.desktop), WM_APP_REBOTTOM, WPARAM(0), LPARAM(0))
+                        };
                     }
                 }
+                None
             }
-            let _ = &brush;
-            rt.EndDraw(None, None)
-        };
-        if let Err(e) = result {
-            tracing::debug!(error = %e, "EndDraw failed; recreating render target");
-            self.drop_target();
+            WM_CONTEXTMENU => {
+                // SAFETY: forwarding to our own desktop window.
+                let _ = unsafe { PostMessageW(Some(self.desktop), msg, wparam, lparam) };
+                Some(LRESULT(0))
+            }
+            WM_CLOSE => Some(LRESULT(0)),
+            _ => None,
         }
+    }
+}
+
+/// Does `hwnd` have a visible child window (a wallpaper app's)?
+fn has_visible_child(hwnd: HWND) -> bool {
+    // SAFETY: plain window queries.
+    unsafe {
+        let mut child = GetWindow(hwnd, GW_CHILD).ok();
+        while let Some(c) = child {
+            if IsWindowVisible(c).as_bool() {
+                return true;
+            }
+            child = GetWindow(c, GW_HWNDNEXT).ok();
+        }
+    }
+    false
+}
+
+struct Desktop {
+    hwnd: HWND,
+    lang: Lang,
+    factory: ID2D1Factory,
+    surface: Surface,
+    /// Created on the first `WM_SPAWN_WORKERW` (shell mode only).
+    workers: Option<Workers>,
+    settings: Settings,
+    image: Option<Decoded>,
+    /// Virtual screen in screen coordinates.
+    screen: RECT,
+    /// Monitor rects relative to the window origin.
+    monitors: Vec<Rect>,
+}
+
+impl Desktop {
+    fn refresh_geometry(&mut self) {
+        self.screen = explorer_win::desktop::virtual_screen();
+        let (ox, oy) = (self.screen.left as f32, self.screen.top as f32);
+        self.monitors = explorer_win::monitors::all()
+            .iter()
+            .map(|m| {
+                Rect::new(
+                    m.rect.left as f32 - ox,
+                    m.rect.top as f32 - oy,
+                    (m.rect.right - m.rect.left) as f32,
+                    (m.rect.bottom - m.rect.top) as f32,
+                )
+            })
+            .collect();
+        let r = self.screen;
+        if let Some(w) = &mut self.workers {
+            // SAFETY: our own window; the wallpaper app positions its child
+            // in this window's client coordinates.
+            let _ = unsafe {
+                SetWindowPos(
+                    w.wallpaper,
+                    None,
+                    r.left,
+                    r.top,
+                    r.right - r.left,
+                    r.bottom - r.top,
+                    SWP_NOACTIVATE | SWP_NOZORDER,
+                )
+            };
+            w.surface.resize(r);
+        }
+        // SAFETY: our own window.
+        let _ = unsafe {
+            SetWindowPos(
+                self.hwnd,
+                Some(HWND_BOTTOM),
+                r.left,
+                r.top,
+                r.right - r.left,
+                r.bottom - r.top,
+                SWP_NOACTIVATE,
+            )
+        };
+        self.surface.resize(r);
+    }
+
+    /// Answer `WM_SPAWN_WORKERW`: create the `WorkerW` layout once, and put
+    /// it back in order on later calls.
+    fn spawn_workers(&mut self) {
+        if self.workers.as_ref().is_some_and(|w| !w.alive()) {
+            self.workers = None;
+        }
+        if self.workers.is_none() {
+            match self.create_workers() {
+                Ok(w) => {
+                    tracing::info!("WorkerW created for a wallpaper app");
+                    self.workers = Some(w);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "cannot create WorkerW");
+                    return;
+                }
+            }
+        }
+        let Some(w) = &self.workers else { return };
+        let r = self.screen;
+        let keep = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+        // Bottom-most first: icons host, then wallpaper, then us, leaves
+        // (top to bottom) icons host > wallpaper WorkerW > Progman, which is
+        // where FindWindowEx(NULL, host, "WorkerW") looks.
+        // SAFETY: our own windows.
+        unsafe {
+            let _ = SetWindowPos(w.icons, Some(HWND_BOTTOM), 0, 0, 0, 0, keep);
+            let _ = SetWindowPos(
+                w.wallpaper,
+                Some(HWND_BOTTOM),
+                r.left,
+                r.top,
+                r.right - r.left,
+                r.bottom - r.top,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+            let _ = SetWindowPos(self.hwnd, Some(HWND_BOTTOM), 0, 0, 0, 0, keep);
+        }
+    }
+
+    fn create_workers(&self) -> anyhow::Result<Workers> {
+        let r = self.screen;
+        let none = RECT::default();
+        let icons = window::create(
+            CreateParams {
+                class: "WorkerW",
+                title: "",
+                style: WS_POPUP | WS_CLIPCHILDREN,
+                ex_style: WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                rect: none,
+                parent: None,
+            },
+            Box::new(Inert),
+        )?;
+        let made = window::create(
+            CreateParams {
+                class: "SHELLDLL_DefView",
+                title: "",
+                style: WS_CHILD,
+                ex_style: WINDOW_EX_STYLE(0),
+                rect: none,
+                parent: Some(icons),
+            },
+            Box::new(Inert),
+        )
+        .and_then(|_| {
+            window::create(
+                CreateParams {
+                    class: "WorkerW",
+                    title: "",
+                    style: WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+                    ex_style: WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                    rect: r,
+                    parent: None,
+                },
+                Box::new(WallpaperWorker { desktop: self.hwnd }),
+            )
+        });
+        match made {
+            Ok(wallpaper) => Ok(Workers {
+                icons,
+                wallpaper,
+                surface: Surface::default(),
+            }),
+            Err(e) => {
+                // SAFETY: our own window (its child goes with it).
+                let _ = unsafe { DestroyWindow(icons) };
+                Err(e)
+            }
+        }
+    }
+
+    /// Re-read the settings; decode the image again if needed.
+    fn reload(&mut self, force_decode: bool) {
+        let new = wallpaper::settings();
+        let decode = force_decode
+            || self.image.is_none()
+            || new.path != self.settings.path
+            || new.style != self.settings.style;
+        self.settings = new;
+        if decode {
+            self.decode();
+        }
+    }
+
+    fn decode(&mut self) {
+        self.image = None;
+        self.surface.bitmap = None;
+        if let Some(w) = &mut self.workers {
+            w.surface.bitmap = None;
+        }
+        let Some(path) = self.settings.path.clone() else {
+            tracing::info!("no wallpaper image; solid colour");
+            return;
+        };
+        let max_side = self
+            .surface
+            .ensure_target(&self.factory, self.hwnd, self.screen)
+            // SAFETY: plain query on a live target.
+            .map(|(rt, _)| unsafe { rt.GetMaximumBitmapSize() })
+            .unwrap_or(8192)
+            .max(1024);
+        let style = self.settings.style;
+        let monitors = self.monitors.clone();
+        match wallpaper::decode(&path, |w, h| decode_size(style, w, h, &monitors, max_side)) {
+            Ok(img) => {
+                tracing::info!(path = %path.display(), w = img.width, h = img.height, ?style, "wallpaper decoded");
+                self.image = Some(img);
+            }
+            Err(e) => tracing::warn!(path = %path.display(), error = %e, "cannot decode wallpaper"),
+        }
+    }
+
+    fn paint(&mut self) {
+        paint_surface(
+            &mut self.surface,
+            self.hwnd,
+            &self.factory,
+            self.screen,
+            &self.settings,
+            self.image.as_ref(),
+            &self.monitors,
+        );
+    }
+
+    fn paint_worker(&mut self) {
+        let Some(w) = &mut self.workers else { return };
+        // A wallpaper app's window covers it: drawing would only fight it.
+        if has_visible_child(w.wallpaper) {
+            return;
+        }
+        paint_surface(
+            &mut w.surface,
+            w.wallpaper,
+            &self.factory,
+            self.screen,
+            &self.settings,
+            self.image.as_ref(),
+            &self.monitors,
+        );
     }
 
     fn context_menu(&mut self, lparam: LPARAM) {
@@ -337,8 +621,13 @@ impl Desktop {
     }
 
     fn invalidate(&self) {
-        // SAFETY: our own window.
-        let _ = unsafe { InvalidateRect(Some(self.hwnd), None, false) };
+        // SAFETY: our own windows.
+        unsafe {
+            let _ = InvalidateRect(Some(self.hwnd), None, false);
+            if let Some(w) = &self.workers {
+                let _ = InvalidateRect(Some(w.wallpaper), None, false);
+            }
+        }
     }
 }
 
@@ -418,6 +707,29 @@ impl Handler for Desktop {
                 self.context_menu(lparam);
                 Some(LRESULT(0))
             }
+            WM_SPAWN_WORKERW => {
+                self.spawn_workers();
+                Some(LRESULT(0))
+            }
+            WM_APP_PAINT_WORKER => {
+                self.paint_worker();
+                Some(LRESULT(0))
+            }
+            WM_APP_REBOTTOM => {
+                // SAFETY: our own window.
+                let _ = unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        Some(HWND_BOTTOM),
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                    )
+                };
+                Some(LRESULT(0))
+            }
             // The desktop is never closed by other programs (Alt+F4 on the
             // desktop, stray WM_CLOSE); only the shutdown message stops it.
             WM_CLOSE => Some(LRESULT(0)),
@@ -493,8 +805,8 @@ pub fn run(args: Args) -> i32 {
             hwnd: HWND::default(),
             lang,
             factory,
-            target: None,
-            bitmap: None,
+            surface: Surface::default(),
+            workers: None,
             settings: wallpaper::settings(),
             image: None,
             screen,
