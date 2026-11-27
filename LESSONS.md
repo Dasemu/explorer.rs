@@ -247,3 +247,10 @@ Non-obvious findings. Add an entry whenever something surprises you.
   Reserving once at start-up is not enough: check every few seconds that
   the work area still leaves the bar's space free, and reserve again (with
   a back-off, each attempt broadcasts to every window).
+- **Wallpaper apps need Explorer's `WorkerW` trick, not just a `Progman`.**
+  Wallpaper Engine and Lively send `0x052C` to `Progman`, then look for the
+  top-level window holding `SHELLDLL_DefView` and take the `WorkerW` right
+  below it in the Z order as the parent for their window. A shell that only
+  paints the wallpaper gives them nothing to attach to, so they silently
+  fail. Answer the message with that layout, and do not paint over the
+  app's window once it is inside.

@@ -62,6 +62,16 @@ wallpaper and to the monitor layout. Right-click shows *Personalize*,
 the shell window (`GetShellWindow`) with the classic `Progman` /
 "Program Manager" name some programs look for.
 
+Animated-wallpaper apps (Wallpaper Engine, Lively Wallpaper, …) work by
+sending the undocumented message `0x052C` to `Progman`, after which Explorer
+splits the desktop into `WorkerW` windows and the app puts its own window in
+the one behind the icons. The desktop answers that message the same way: it
+creates a hidden `WorkerW` holding an empty `SHELLDLL_DefView`, and right
+below it a full-screen `WorkerW` (above our `Progman`) for the app's window.
+That `WorkerW` shows the normal wallpaper while no app window is inside it.
+It follows the classic (pre-Windows 11 24H2) layout, which these apps look
+for first.
+
 Configure it with:
 
 ```toml
